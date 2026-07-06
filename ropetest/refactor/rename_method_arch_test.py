@@ -387,5 +387,73 @@ class RenameMethodRefactoringTest(RenameMethodArchMixin, unittest.TestCase):
             refactoring.generate_changes()
 
 
+class RenameMethodDriverTest(RenameMethodArchMixin, unittest.TestCase):
+    def _driver(self, module, code, policy, new_name="new_method", **kwds):
+        refactoring = arch.RenameMethodRefactoring(
+            self.project, module, code.index("a_method"), new_name, **kwds
+        )
+        return arch.RenameMethodDriver(refactoring, policy=policy)
+
+    def test_rejects_unknown_policies(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = arch.RenameMethodRefactoring(
+            self.project, mod, SIMPLE_CLASS.index("a_method"), "new_method"
+        )
+        with self.assertRaises(ValueError):
+            arch.RenameMethodDriver(refactoring, policy="ask_the_user")
+
+    def test_legacy_policy_returns_changes_without_warnings(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        result = self._driver(mod, DUCK_TYPED, arch.LEGACY).run()
+        self.assertEqual(arch.LEGACY, result.mode)
+        self.assertEqual([], result.warning_results)
+        self.assertEqual(
+            "Renaming <a_method> to <new_method>", result.changes.description
+        )
+
+    def test_legacy_policy_skips_behavior_preserving_checks(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        driver = self._driver(mod, DUCK_TYPED, arch.LEGACY)
+        result = driver.run()
+        self.assertIsNone(
+            driver.refactoring._breaking_change_preconditions
+        )
+        self.assertIsNotNone(result.changes)
+
+    def test_legacy_policy_hard_fails_on_keywords(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        driver = self._driver(mod, SIMPLE_CLASS, arch.LEGACY, new_name="lambda")
+        with self.assertRaises(exceptions.RefactoringError):
+            driver.run()
+
+    def test_fail_on_warning_returns_no_changes(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        result = self._driver(mod, DUCK_TYPED, arch.FAIL_ON_WARNING).run()
+        self.assertIsNone(result.changes)
+        names = {condition.name for condition in result.warning_results}
+        self.assertIn("no-unsure-occurrences", names)
+
+    def test_fail_on_warning_returns_changes_when_clean(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        result = self._driver(mod, SIMPLE_CLASS, arch.FAIL_ON_WARNING).run()
+        self.assertIsNotNone(result.changes)
+        self.assertEqual([], result.warning_results)
+
+    def test_proceed_after_warning_returns_both(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        result = self._driver(mod, DUCK_TYPED, arch.PROCEED_AFTER_WARNING).run()
+        self.assertIsNotNone(result.changes)
+        self.assertTrue(result.warning_results)
+        self.assertTrue(result.warning_results[0].violators)
+
+    def test_result_records_checked_applicability_conditions(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        result = self._driver(mod, SIMPLE_CLASS, arch.LEGACY).run()
+        self.assertEqual(
+            ["valid-name"],
+            [condition.name for condition in result.applicability_results],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

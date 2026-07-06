@@ -528,6 +528,77 @@ def check_applicability_preconditions(operation):
         )
 
 
+LEGACY = "legacy"
+FAIL_ON_WARNING = "fail_on_warning"
+PROCEED_AFTER_WARNING = "proceed_after_warning"
+
+POLICIES = (LEGACY, FAIL_ON_WARNING, PROCEED_AFTER_WARNING)
+
+
+class RefactoringExecutionResult:
+    """What a driver run produced.
+
+    * `changes`: the `ChangeSet`, or `None` when the policy rejected it.
+    * `applicability_results`: the checked applicability conditions.
+    * `warning_results`: the failed behavior-preserving conditions,
+      with their violators.
+    * `mode`: the policy that ran.
+    """
+
+    def __init__(self, changes, applicability_results, warning_results, mode):
+        self.changes = changes
+        self.applicability_results = applicability_results
+        self.warning_results = warning_results
+        self.mode = mode
+
+
+class RenameMethodDriver:
+    """Headless orchestrator for method rename.
+
+    The interactive driver of the reference architecture resolves
+    warnings with the user; this headless equivalent resolves them
+    with an explicit policy.  Like its interactive counterpart it uses
+    the fine-grained layer of the API (individual conditions and
+    `private_transform`) rather than `generate_changes`.
+
+    * `legacy`: reproduce `Rename.get_changes()` semantics --
+      behavior-preserving conditions are not consulted.
+    * `fail_on_warning`: return warnings and no changes.
+    * `proceed_after_warning`: return warnings and the changes.
+    """
+
+    def __init__(self, refactoring, policy=LEGACY):
+        if policy not in POLICIES:
+            raise ValueError(f"Unknown warning policy: {policy!r}")
+        self.refactoring = refactoring
+        self.policy = policy
+
+    def run(self):
+        refactoring = self.refactoring
+        refactoring.prepare_for_execution()
+        applicability = refactoring.applicability_preconditions()
+        failed = [condition for condition in applicability if not condition.check()]
+        if failed:
+            raise exceptions.RefactoringError(
+                "\n".join(condition.error_string() for condition in failed)
+            )
+        warnings = []
+        if self.policy != LEGACY:
+            warnings = [
+                condition
+                for condition in refactoring.breaking_change_preconditions()
+                if not condition.check()
+            ]
+            if warnings and self.policy == FAIL_ON_WARNING:
+                return RefactoringExecutionResult(
+                    None, applicability, warnings, self.policy
+                )
+        changes = refactoring.private_transform()
+        return RefactoringExecutionResult(
+            changes, applicability, warnings, self.policy
+        )
+
+
 class _OccurrenceAnalysis:
     """One shared occurrence-analysis pass over the selected resources.
 
