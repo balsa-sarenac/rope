@@ -186,5 +186,206 @@ class RenameMethodTransformationTest(RenameMethodArchMixin, unittest.TestCase):
         self.assertEqual({arch.APPLICABILITY}, levels)
 
 
+DUCK_TYPED = dedent("""\
+    class A(object):
+        def a_method(self):
+            pass
+    def f(arg):
+        arg.a_method()
+""")
+
+
+class BehaviorPreservingConditionTest(RenameMethodArchMixin, unittest.TestCase):
+    def _refactoring(self, module, code, new_name="new_method", **kwds):
+        return arch.RenameMethodRefactoring(
+            self.project, module, code.index("a_method"), new_name, **kwds
+        )
+
+    def test_hierarchy_condition_passes_for_fresh_names(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = self._refactoring(mod, SIMPLE_CLASS)
+        refactoring.prepare_for_execution()
+        condition = refactoring.hierarchy_conflict_condition()
+        self.assertTrue(condition.check())
+
+    def test_hierarchy_condition_finds_conflict_in_same_class(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+                def new_method(self):
+                    pass
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code)
+        refactoring.prepare_for_execution()
+        condition = refactoring.hierarchy_conflict_condition()
+        self.assertFalse(condition.check())
+        self.assertEqual(1, len(condition.violators))
+        self.assertIsNotNone(condition.violators[0].pyname)
+        self.assertIn("new_method", condition.error_string())
+
+    def test_hierarchy_condition_finds_conflict_in_superclass(self):
+        code = dedent("""\
+            class Base(object):
+                def new_method(self):
+                    pass
+            class A(Base):
+                def a_method(self):
+                    pass
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code)
+        refactoring.prepare_for_execution()
+        condition = refactoring.hierarchy_conflict_condition()
+        self.assertFalse(condition.check())
+
+    def test_unsure_condition_reports_duck_typed_occurrences(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        refactoring = self._refactoring(mod, DUCK_TYPED)
+        refactoring.prepare_for_execution()
+        condition = refactoring.unsure_occurrences_condition()
+        self.assertFalse(condition.check())
+        occurrence = condition.violators[0]
+        self.assertEqual(mod, occurrence.resource)
+        self.assertEqual(5, occurrence.lineno)
+
+    def test_unsure_condition_passes_for_known_receivers(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = self._refactoring(mod, SIMPLE_CLASS)
+        refactoring.prepare_for_execution()
+        self.assertTrue(refactoring.unsure_occurrences_condition().check())
+
+    def test_reflective_condition_finds_getattr(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+            getattr(A(), "a_method")()
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code)
+        refactoring.prepare_for_execution()
+        condition = refactoring.reflective_references_condition()
+        self.assertFalse(condition.check())
+        reference = condition.violators[0]
+        self.assertEqual("getattr", reference.kind)
+        self.assertEqual(4, reference.lineno)
+
+    def test_reflective_condition_finds_methodcaller_and_strings(self):
+        code = dedent("""\
+            from operator import methodcaller
+            class A(object):
+                def a_method(self):
+                    pass
+            call = methodcaller("a_method")
+            name = "a_method"
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code)
+        refactoring.prepare_for_execution()
+        condition = refactoring.reflective_references_condition()
+        self.assertFalse(condition.check())
+        kinds = {reference.kind for reference in condition.violators}
+        self.assertEqual({"methodcaller", "string"}, kinds)
+
+    def test_reflective_condition_trivially_passes_with_docs(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+            getattr(A(), "a_method")()
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code, docs=True)
+        refactoring.prepare_for_execution()
+        self.assertTrue(refactoring.reflective_references_condition().check())
+
+    def test_coverage_condition_reports_excluded_files(self):
+        mod1 = self._write_module("mod1", SIMPLE_CLASS)
+        mod2 = self._write_module("mod2", "import mod1\n")
+        refactoring = self._refactoring(mod1, SIMPLE_CLASS, resources=[mod1])
+        refactoring.prepare_for_execution()
+        condition = refactoring.analysis_coverage_condition()
+        self.assertFalse(condition.check())
+        self.assertEqual([mod2], condition.violators)
+
+    def test_coverage_condition_passes_without_restriction(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = self._refactoring(mod, SIMPLE_CLASS)
+        refactoring.prepare_for_execution()
+        self.assertTrue(refactoring.analysis_coverage_condition().check())
+
+
+class RenameMethodRefactoringTest(RenameMethodArchMixin, unittest.TestCase):
+    def _refactoring(self, module, code, new_name="new_method", **kwds):
+        return arch.RenameMethodRefactoring(
+            self.project, module, code.index("a_method"), new_name, **kwds
+        )
+
+    def test_refactoring_delegates_applicability_to_transformation(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = self._refactoring(mod, SIMPLE_CLASS)
+        refactoring.prepare_for_execution()
+        self.assertEqual(
+            [condition.name for condition in
+             refactoring.transformation.applicability_preconditions()],
+            [condition.name for condition in
+             refactoring.applicability_preconditions()],
+        )
+
+    def test_breaking_change_preconditions_are_behavior_preserving(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = self._refactoring(mod, SIMPLE_CLASS)
+        refactoring.prepare_for_execution()
+        conditions = refactoring.breaking_change_preconditions()
+        self.assertTrue(conditions)
+        self.assertEqual(
+            {arch.BEHAVIOR_PRESERVING},
+            {condition.level for condition in conditions},
+        )
+
+    def test_two_levels_share_the_change_function(self):
+        mod1 = self._write_module("mod1", SIMPLE_CLASS)
+        transformation = arch.RenameMethodTransformation(
+            self.project, mod1, SIMPLE_CLASS.index("a_method"), "new_method"
+        )
+        transformation_changes = transformation.generate_changes()
+        mod2 = self._write_module("mod2", SIMPLE_CLASS)
+        refactoring = arch.RenameMethodRefactoring(
+            self.project, mod2, SIMPLE_CLASS.index("a_method"), "new_method"
+        )
+        refactoring_changes = refactoring.generate_changes()
+        self.assertEqual(
+            transformation_changes.description, refactoring_changes.description
+        )
+        self.assertEqual(
+            [change.new_contents for change in transformation_changes.changes],
+            [change.new_contents for change in refactoring_changes.changes],
+        )
+
+    def test_generate_changes_warns_on_unsure_occurrences(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        refactoring = self._refactoring(mod, DUCK_TYPED)
+        with self.assertRaises(arch.BehaviorPreservationWarning) as caught:
+            refactoring.generate_changes()
+        names = {condition.name for condition in caught.exception.conditions}
+        self.assertIn("no-unsure-occurrences", names)
+
+    def test_transformation_level_sets_the_warning_aside(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        transformation = arch.RenameMethodTransformation(
+            self.project, mod, DUCK_TYPED.index("a_method"), "new_method"
+        )
+        changes = transformation.generate_changes()
+        self.assertIsNotNone(changes)
+
+    def test_refactoring_still_hard_fails_on_applicability(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = self._refactoring(mod, SIMPLE_CLASS, new_name="lambda")
+        with self.assertRaises(exceptions.RefactoringError):
+            refactoring.generate_changes()
+
+
 if __name__ == "__main__":
     unittest.main()

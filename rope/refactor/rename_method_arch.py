@@ -114,6 +114,204 @@ class ValidNameCondition(Condition):
         )
 
 
+class ConflictingDefinition:
+    """A violator: an existing definition that the new name would clash with."""
+
+    def __init__(self, pyname):
+        self.pyname = pyname
+        self.module, self.lineno = pyname.get_definition_location()
+
+
+class HierarchyDoesNotDefineNameCondition(Condition):
+    """The new name does not already resolve in the method's class.
+
+    `PyClass.get_attributes()` merges superclass attributes, so this
+    checks the class and its ancestors up to the root.  Sibling
+    subclasses are not checked; the restriction is documented in the
+    research artifact.
+    """
+
+    name = "hierarchy-does-not-define-name"
+    level = BEHAVIOR_PRESERVING
+
+    def __init__(self, pyclass, new_name):
+        super().__init__()
+        self.pyclass = pyclass
+        self.new_name = new_name
+
+    def _find_violators(self):
+        attributes = self.pyclass.get_attributes()
+        if self.new_name in attributes:
+            return [ConflictingDefinition(attributes[self.new_name])]
+        return []
+
+    def error_string(self):
+        return (
+            f"'{self.new_name}' is already defined in the class"
+            f" hierarchy of '{self.pyclass.get_name()}'."
+        )
+
+
+class NoUnsureOccurrencesCondition(Condition):
+    """No occurrence of the old name has an unresolvable receiver.
+
+    Violators are the unsure `Occurrence` objects recorded during the
+    shared occurrence analysis; checking this condition triggers that
+    analysis, so warnings are never cheaper than the search itself.
+    """
+
+    name = "no-unsure-occurrences"
+    level = BEHAVIOR_PRESERVING
+
+    def __init__(self, transformation):
+        super().__init__()
+        self.transformation = transformation
+
+    def _find_violators(self):
+        analysis = self.transformation.analysis
+        analysis.ensure_ran()
+        return analysis.unsure_occurrences
+
+    def error_string(self):
+        places = ", ".join(
+            f"{occurrence.resource.path}:{occurrence.lineno}"
+            for occurrence in self.violators
+        )
+        return (
+            f"{len(self.violators)} occurrence(s) of"
+            f" '{self.transformation.old_name}' could not be resolved"
+            f" statically: {places}"
+        )
+
+
+class ReflectiveReference:
+    """A violator: a reflective or textual reference to the old name."""
+
+    def __init__(self, resource, lineno, kind):
+        self.resource = resource
+        self.lineno = lineno
+        self.kind = kind
+
+
+class NoReflectiveReferencesCondition(Condition):
+    """No reflective or textual reference to the old name is visible.
+
+    A conservative AST scan for ``getattr``/``setattr``/``hasattr``/
+    ``delattr`` calls, ``methodcaller`` and string constants equal to
+    the old name.  With ``docs=True`` rope renames textual occurrences
+    itself, so the condition passes trivially.  This is a partial
+    approximation of Python's reflection facilities.
+    """
+
+    name = "no-reflective-references"
+    level = BEHAVIOR_PRESERVING
+
+    _reflective_builtins = {"getattr", "setattr", "hasattr", "delattr"}
+
+    def __init__(self, transformation):
+        super().__init__()
+        self.transformation = transformation
+
+    def _find_violators(self):
+        if self.transformation.docs:
+            return []
+        violators = []
+        for resource in self.transformation.resources:
+            try:
+                tree = ast.parse(resource.read())
+            except SyntaxError:
+                continue
+            violators.extend(self._scan_module(resource, tree))
+        return violators
+
+    def _scan_module(self, resource, tree):
+        old_name = self.transformation.old_name
+        reflective_arguments = set()
+        violators = []
+        for node in ast.walk(tree):
+            reference = self._match_call(node, old_name)
+            if reference is not None:
+                reflective_arguments.add(id(reference))
+                violators.append(
+                    ReflectiveReference(resource, node.lineno, self._kind(node))
+                )
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and node.value == old_name
+                and id(node) not in reflective_arguments
+            ):
+                violators.append(ReflectiveReference(resource, node.lineno, "string"))
+        return violators
+
+    def _match_call(self, node, old_name):
+        """Return the string argument node when `node` reflects `old_name`."""
+        if not isinstance(node, ast.Call):
+            return None
+        kind = self._kind(node)
+        if kind in self._reflective_builtins:
+            arg_index = 1
+        elif kind == "methodcaller":
+            arg_index = 0
+        else:
+            return None
+        if len(node.args) <= arg_index:
+            return None
+        argument = node.args[arg_index]
+        if isinstance(argument, ast.Constant) and argument.value == old_name:
+            return argument
+        return None
+
+    def _kind(self, node):
+        function = node.func
+        if isinstance(function, ast.Name):
+            return function.id
+        if isinstance(function, ast.Attribute):
+            return function.attr
+        return None
+
+    def error_string(self):
+        places = ", ".join(
+            f"{reference.resource.path}:{reference.lineno} ({reference.kind})"
+            for reference in self.violators
+        )
+        return (
+            f"'{self.transformation.old_name}' is referenced reflectively"
+            f" or textually and will not be renamed: {places}"
+        )
+
+
+class AnalysisCoversAllClientsCondition(Condition):
+    """The analysis covers every python file of the project.
+
+    When `resources` restricts the analysis, clients outside the
+    selection keep calling the old name; the excluded files are the
+    violators.
+    """
+
+    name = "analysis-covers-all-clients"
+    level = BEHAVIOR_PRESERVING
+
+    def __init__(self, transformation):
+        super().__init__()
+        self.transformation = transformation
+
+    def _find_violators(self):
+        analyzed = set(self.transformation.resources)
+        return [
+            file_
+            for file_ in self.transformation.project.get_python_files()
+            if file_ not in analyzed
+        ]
+
+    def error_string(self):
+        places = ", ".join(file_.path for file_ in self.violators)
+        return (
+            f"The analysis is restricted; possible clients are not"
+            f" updated: {places}"
+        )
+
+
 class RenameMethodTransformation:
     """Behavior-agnostic method rename.
 
@@ -220,6 +418,96 @@ class RenameMethodTransformation:
 
     def perform_changes(self):
         self.project.do(self.changes)
+
+    def execute(self):
+        self.generate_changes()
+        self.perform_changes()
+        return self.changes
+
+
+class RenameMethodRefactoring:
+    """Behavior-preserving method rename.
+
+    A decorator over `RenameMethodTransformation`: it shares the
+    transformation's applicability preconditions and change function
+    and adds behavior-preserving preconditions.  Violations of those
+    partition the applicability domain instead of restricting it --
+    the same change is still constructible through the transformation.
+    """
+
+    def __init__(self, *args, **kwds):
+        self.transformation = RenameMethodTransformation(*args, **kwds)
+        self._breaking_change_preconditions = None
+
+    @property
+    def project(self):
+        return self.transformation.project
+
+    @property
+    def old_name(self):
+        return self.transformation.old_name
+
+    @property
+    def new_name(self):
+        return self.transformation.new_name
+
+    @property
+    def changes(self):
+        return self.transformation.changes
+
+    def prepare_for_execution(self):
+        self.transformation.prepare_for_execution()
+
+    def applicability_preconditions(self):
+        return self.transformation.applicability_preconditions()
+
+    def breaking_change_preconditions(self):
+        if self._breaking_change_preconditions is None:
+            self._breaking_change_preconditions = [
+                self.hierarchy_conflict_condition(),
+                self.unsure_occurrences_condition(),
+                self.reflective_references_condition(),
+                self.analysis_coverage_condition(),
+            ]
+        return self._breaking_change_preconditions
+
+    def hierarchy_conflict_condition(self):
+        return HierarchyDoesNotDefineNameCondition(
+            self.transformation.get_pyclass(), self.transformation.new_name
+        )
+
+    def unsure_occurrences_condition(self):
+        return NoUnsureOccurrencesCondition(self.transformation)
+
+    def reflective_references_condition(self):
+        return NoReflectiveReferencesCondition(self.transformation)
+
+    def analysis_coverage_condition(self):
+        return AnalysisCoversAllClientsCondition(self.transformation)
+
+    def check_preconditions(self):
+        self.transformation.check_preconditions()
+        self.check_breaking_change_preconditions()
+
+    def check_breaking_change_preconditions(self):
+        failed = [
+            condition
+            for condition in self.breaking_change_preconditions()
+            if not condition.check()
+        ]
+        if failed:
+            raise BehaviorPreservationWarning(failed)
+
+    def private_transform(self):
+        return self.transformation.private_transform()
+
+    def generate_changes(self):
+        self.prepare_for_execution()
+        self.check_preconditions()
+        return self.private_transform()
+
+    def perform_changes(self):
+        self.transformation.perform_changes()
 
     def execute(self):
         self.generate_changes()
