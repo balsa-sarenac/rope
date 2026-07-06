@@ -27,6 +27,7 @@ class Rename:
         """If `offset` is None, the `resource` itself will be renamed"""
         self.project = project
         self.resource = resource
+        self.offset = offset
         if offset is not None:
             self.old_name = worder.get_name_at(self.resource, offset)
             this_pymodule = self.project.get_pymodule(self.resource)
@@ -107,6 +108,10 @@ class Rename:
         if resources is None:
             resources = self.project.get_python_files()
         self.validate_changes(new_name)
+        if self.is_method():
+            return self._get_method_rename_changes(
+                new_name, resources, in_hierarchy, unsure, docs, task_handle
+            )
         changes = ChangeSet(f"Renaming <{self.old_name}> to <{new_name}>")
         finder = occurrences.create_finder(
             self.project,
@@ -129,6 +134,29 @@ class Rename:
             if self._is_allowed_to_move(resources, resource):
                 self._rename_module(resource, new_name, changes)
         return changes
+
+    def _get_method_rename_changes(
+        self, new_name, resources, in_hierarchy, unsure, docs, task_handle
+    ):
+        """Delegate to the architecture path in legacy mode."""
+        from rope.refactor import rename_method_arch
+
+        refactoring = rename_method_arch.RenameMethodRefactoring(
+            self.project,
+            self.resource,
+            self.offset,
+            new_name,
+            resources=resources,
+            in_hierarchy=in_hierarchy,
+            unsure=unsure,
+            docs=docs,
+            task_handle=task_handle,
+            require_identifier=False,
+        )
+        driver = rename_method_arch.RenameMethodDriver(
+            refactoring, policy=rename_method_arch.LEGACY
+        )
+        return driver.run().changes
 
     def validate_changes(
         self,

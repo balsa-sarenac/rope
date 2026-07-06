@@ -3,6 +3,7 @@ from textwrap import dedent
 
 from rope.base import exceptions
 from rope.refactor import rename_method_arch as arch
+from rope.refactor.rename import Rename
 from ropetest import testutils
 
 
@@ -453,6 +454,51 @@ class RenameMethodDriverTest(RenameMethodArchMixin, unittest.TestCase):
             ["valid-name"],
             [condition.name for condition in result.applicability_results],
         )
+
+
+class LegacyDelegationTest(RenameMethodArchMixin, unittest.TestCase):
+    def test_get_changes_matches_the_legacy_driver_for_methods(self):
+        mod = self._write_module("mod1", DUCK_TYPED)
+        legacy_changes = Rename(
+            self.project, mod, DUCK_TYPED.index("a_method")
+        ).get_changes("new_method")
+        refactoring = arch.RenameMethodRefactoring(
+            self.project,
+            mod,
+            DUCK_TYPED.index("a_method"),
+            "new_method",
+            require_identifier=False,
+        )
+        driver_changes = arch.RenameMethodDriver(
+            refactoring, policy=arch.LEGACY
+        ).run().changes
+        self.assertEqual(legacy_changes.description, driver_changes.description)
+        self.assertEqual(
+            [change.new_contents for change in legacy_changes.changes],
+            [change.new_contents for change in driver_changes.changes],
+        )
+
+    def test_get_changes_keeps_keyword_error_for_methods(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        renamer = Rename(self.project, mod, SIMPLE_CLASS.index("a_method"))
+        with self.assertRaises(exceptions.RefactoringError) as caught:
+            renamer.get_changes("lambda")
+        self.assertIn("keyword", str(caught.exception))
+
+    def test_get_changes_keeps_legacy_name_leniency_for_methods(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        renamer = Rename(self.project, mod, SIMPLE_CLASS.index("a_method"))
+        changes = renamer.get_changes("not an identifier")
+        self.assertIsNotNone(changes)
+
+    def test_get_changes_unchanged_for_non_methods(self):
+        code = "a_var = 1\nprint(a_var)\n"
+        mod = self._write_module("mod1", code)
+        changes = Rename(self.project, mod, code.index("a_var")).get_changes(
+            "new_var"
+        )
+        self.project.do(changes)
+        self.assertEqual("new_var = 1\nprint(new_var)\n", mod.read())
 
 
 if __name__ == "__main__":
