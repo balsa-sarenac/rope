@@ -331,7 +331,7 @@ class BehaviorPreservingConditionTest(RenameMethodArchMixin, unittest.TestCase):
         kinds = {reference.kind for reference in condition.violators}
         self.assertEqual({"methodcaller", "string"}, kinds)
 
-    def test_reflective_condition_trivially_passes_with_docs(self):
+    def test_reflective_condition_passes_with_docs_for_contiguous_strings(self):
         code = dedent("""\
             class A(object):
                 def a_method(self):
@@ -342,6 +342,33 @@ class BehaviorPreservingConditionTest(RenameMethodArchMixin, unittest.TestCase):
         refactoring = self._refactoring(mod, code, docs=True)
         refactoring.prepare_for_execution()
         self.assertTrue(refactoring.reflective_references_condition().check())
+
+    def test_reflective_condition_finds_folded_strings_despite_docs(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+            getattr(A(), "a_" "method")()
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code, docs=True)
+        refactoring.prepare_for_execution()
+        condition = refactoring.reflective_references_condition()
+        self.assertFalse(condition.check())
+        self.assertEqual("getattr", condition.violators[0].kind)
+
+    def test_reflective_condition_finds_folded_strings_without_docs(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+            getattr(A(), "a_" "method")()
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code)
+        refactoring.prepare_for_execution()
+        condition = refactoring.reflective_references_condition()
+        self.assertFalse(condition.check())
 
     def test_coverage_condition_reports_excluded_files(self):
         mod1 = self._write_module("mod1", SIMPLE_CLASS)

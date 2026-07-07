@@ -230,7 +230,9 @@ class NoReflectiveReferencesCondition(Condition):
     A conservative AST scan for ``getattr``/``setattr``/``hasattr``/
     ``delattr`` calls, ``methodcaller`` and string constants equal to
     the old name.  With ``docs=True`` rope renames textual occurrences
-    itself, so the condition passes trivially.  This is a partial
+    itself, but only where the name appears contiguously in the
+    source; references the textual finder cannot see (folded implicit
+    concatenations, escapes) are still reported.  This is a partial
     approximation of Python's reflection facilities.
     """
 
@@ -244,25 +246,26 @@ class NoReflectiveReferencesCondition(Condition):
         self.transformation = transformation
 
     def _find_violators(self):
-        if self.transformation.docs:
-            return []
         violators = []
         for resource in self.transformation.resources:
+            source = resource.read()
             try:
-                tree = ast.parse(resource.read())
+                tree = ast.parse(source)
             except SyntaxError:
                 continue
-            violators.extend(self._scan_module(resource, tree))
+            violators.extend(self._scan_module(resource, tree, source))
         return violators
 
-    def _scan_module(self, resource, tree):
+    def _scan_module(self, resource, tree, source):
         old_name = self.transformation.old_name
         reflective_arguments = set()
         violators = []
         for node in ast.walk(tree):
-            reference = self._match_call(node, old_name)
-            if reference is not None:
-                reflective_arguments.add(id(reference))
+            argument = self._match_call(node, old_name)
+            if argument is not None:
+                reflective_arguments.add(id(argument))
+                if self._is_covered_by_docs_rename(argument, source):
+                    continue
                 violators.append(
                     ReflectiveReference(resource, node.lineno, self._kind(node))
                 )
@@ -271,9 +274,22 @@ class NoReflectiveReferencesCondition(Condition):
                 isinstance(node, ast.Constant)
                 and node.value == old_name
                 and id(node) not in reflective_arguments
+                and not self._is_covered_by_docs_rename(node, source)
             ):
                 violators.append(ReflectiveReference(resource, node.lineno, "string"))
         return violators
+
+    def _is_covered_by_docs_rename(self, node, source):
+        """Whether rope's docs-mode textual rename rewrites this constant.
+
+        The textual finder only sees the name written contiguously, so
+        a folded implicit concatenation stays a violator even with
+        ``docs=True``.
+        """
+        if not self.transformation.docs:
+            return False
+        segment = ast.get_source_segment(source, node)
+        return segment is not None and self.transformation.old_name in segment
 
     def _match_call(self, node, old_name):
         """Return the string argument node when `node` reflects `old_name`."""
