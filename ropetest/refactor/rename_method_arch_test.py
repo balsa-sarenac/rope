@@ -241,6 +241,47 @@ class BehaviorPreservingConditionTest(RenameMethodArchMixin, unittest.TestCase):
         condition = refactoring.hierarchy_conflict_condition()
         self.assertFalse(condition.check())
 
+    def test_hierarchy_condition_finds_conflict_in_edited_subclass(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+            class B(A):
+                def a_method(self):
+                    pass
+                def new_method(self):
+                    pass
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code, in_hierarchy=True)
+        refactoring.prepare_for_execution()
+        condition = refactoring.hierarchy_conflict_condition()
+        self.assertFalse(condition.check())
+        self.assertEqual(
+            ["B"],
+            [violator.pyclass.get_name() for violator in condition.violators],
+        )
+
+    def test_fail_on_warning_rejects_edited_subclass_conflicts(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+            class B(A):
+                def a_method(self):
+                    pass
+                def new_method(self):
+                    pass
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(mod, code, in_hierarchy=True)
+        result = arch.RenameMethodDriver(
+            refactoring, policy=arch.FAIL_ON_WARNING
+        ).run()
+        self.assertIsNone(result.changes)
+        names = {condition.name for condition in result.warning_results}
+        self.assertIn("hierarchy-does-not-define-name", names)
+
     def test_unsure_condition_reports_duck_typed_occurrences(self):
         mod = self._write_module("mod1", DUCK_TYPED)
         refactoring = self._refactoring(mod, DUCK_TYPED)

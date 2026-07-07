@@ -117,38 +117,69 @@ class ValidNameCondition(Condition):
 class ConflictingDefinition:
     """A violator: an existing definition that the new name would clash with."""
 
-    def __init__(self, pyname):
+    def __init__(self, pyname, pyclass):
         self.pyname = pyname
+        self.pyclass = pyclass
         self.module, self.lineno = pyname.get_definition_location()
 
 
-class HierarchyDoesNotDefineNameCondition(Condition):
-    """The new name does not already resolve in the method's class.
+def _containing_class(pyname):
+    """The class whose body defines `pyname`, if any."""
+    if isinstance(pyname, pynames.DefinedName):
+        scope = pyname.get_object().get_scope()
+        parent = scope.parent
+        if parent is not None and parent.get_kind() == "Class":
+            return parent.pyobject
+    return None
 
-    `PyClass.get_attributes()` merges superclass attributes, so this
-    checks the class and its ancestors up to the root.  Sibling
-    subclasses are not checked; the restriction is documented in the
-    research artifact.
+
+class HierarchyDoesNotDefineNameCondition(Condition):
+    """The new name does not already resolve in any edited class.
+
+    Checks the selected class and every class whose ``def`` header the
+    occurrence analysis renames (with ``in_hierarchy=True`` that
+    includes overriding descendants).  `PyClass.get_attributes()`
+    merges superclass attributes, so each check covers that class's
+    ancestors up to the root.  Checking triggers the shared occurrence
+    analysis.
     """
 
     name = "hierarchy-does-not-define-name"
     level = BEHAVIOR_PRESERVING
 
-    def __init__(self, pyclass, new_name):
+    def __init__(self, transformation):
         super().__init__()
-        self.pyclass = pyclass
-        self.new_name = new_name
+        self.transformation = transformation
+        self.new_name = transformation.new_name
 
     def _find_violators(self):
-        attributes = self.pyclass.get_attributes()
-        if self.new_name in attributes:
-            return [ConflictingDefinition(attributes[self.new_name])]
-        return []
+        analysis = self.transformation.analysis
+        analysis.ensure_ran()
+        classes = [self.transformation.get_pyclass()]
+        for occurrence in analysis.defining_occurrences:
+            pyclass = _containing_class(occurrence.get_pyname())
+            if pyclass is not None:
+                classes.append(pyclass)
+        violators = []
+        seen = set()
+        for pyclass in classes:
+            attributes = pyclass.get_attributes()
+            if self.new_name not in attributes:
+                continue
+            conflict = ConflictingDefinition(attributes[self.new_name], pyclass)
+            key = (pyclass.get_name(), conflict.lineno)
+            if key not in seen:
+                seen.add(key)
+                violators.append(conflict)
+        return violators
 
     def error_string(self):
+        names = ", ".join(
+            sorted({violator.pyclass.get_name() for violator in self.violators})
+        )
         return (
             f"'{self.new_name}' is already defined in the class"
-            f" hierarchy of '{self.pyclass.get_name()}'."
+            f" hierarchy of: {names}."
         )
 
 
@@ -472,9 +503,7 @@ class RenameMethodRefactoring:
         return self._breaking_change_preconditions
 
     def hierarchy_conflict_condition(self):
-        return HierarchyDoesNotDefineNameCondition(
-            self.transformation.get_pyclass(), self.transformation.new_name
-        )
+        return HierarchyDoesNotDefineNameCondition(self.transformation)
 
     def unsure_occurrences_condition(self):
         return NoUnsureOccurrencesCondition(self.transformation)
@@ -613,6 +642,7 @@ class _OccurrenceAnalysis:
     def __init__(self, transformation):
         self.transformation = transformation
         self.unsure_occurrences = []
+        self.defining_occurrences = []
         self.new_contents = []
         self._ran = False
 
@@ -623,14 +653,17 @@ class _OccurrenceAnalysis:
         from rope.refactor.rename import rename_in_module
 
         transformation = self.transformation
-        finder = occurrences.create_finder(
-            transformation.project,
-            transformation.old_name,
-            transformation.old_pyname,
-            unsure=self._record_unsure,
-            docs=transformation.docs,
-            instance=transformation.old_instance,
-            in_hierarchy=transformation.in_hierarchy,
+        finder = _DefinitionRecordingFinder(
+            occurrences.create_finder(
+                transformation.project,
+                transformation.old_name,
+                transformation.old_pyname,
+                unsure=self._record_unsure,
+                docs=transformation.docs,
+                instance=transformation.old_instance,
+                in_hierarchy=transformation.in_hierarchy,
+            ),
+            self.defining_occurrences.append,
         )
         job_set = transformation.task_handle.create_jobset(
             "Collecting Changes", len(transformation.resources)
@@ -650,3 +683,17 @@ class _OccurrenceAnalysis:
         if self.transformation.unsure is None:
             return False
         return self.transformation.unsure(occurrence)
+
+
+class _DefinitionRecordingFinder:
+    """Re-yields a finder's occurrences, recording renamed `def` headers."""
+
+    def __init__(self, finder, record):
+        self.finder = finder
+        self.record = record
+
+    def find_occurrences(self, resource=None, pymodule=None):
+        for occurrence in self.finder.find_occurrences(resource, pymodule):
+            if occurrence.is_defined():
+                self.record(occurrence)
+            yield occurrence
