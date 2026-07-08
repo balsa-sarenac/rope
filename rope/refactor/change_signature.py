@@ -171,12 +171,20 @@ class ChangeSignature:
         in the project are searched.
 
         """
-        function_changer = _FunctionChangers(
-            self.pyname.get_object(), self._definfo(), changers
+        # imported here: change_signature_arch builds on this module
+        from rope.refactor import arch, change_signature_arch
+
+        refactoring = change_signature_arch.ChangeSignatureRefactoring(
+            self.project,
+            self.resource,
+            self.offset,
+            steps=change_signature_arch.steps_for_changers(changers),
+            in_hierarchy=in_hierarchy,
+            resources=resources,
+            task_handle=task_handle,
         )
-        return self._change_calls(
-            function_changer, in_hierarchy, resources, task_handle
-        )
+        driver = arch.RefactoringDriver(refactoring, policy=arch.LEGACY)
+        return driver.run().changes
 
 
 class _FunctionChangers:
