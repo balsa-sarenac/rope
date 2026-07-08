@@ -6,6 +6,36 @@ from rope.base.change import ChangeContents, ChangeSet
 from rope.refactor import functionutils, occurrences
 
 
+def _resolve_signature_target(project, resource, offset):
+    """Resolve the selected offset to a signature-change target.
+
+    Returns ``(name, primary, pyname, others)``.  A class selection is
+    redirected to its ``__init__``; for constructors `others` carries
+    the ``(class_name, class_pyname)`` pair used to update
+    ``ClassName(...)`` call sites.  Both the legacy path and the
+    architecture path resolve through here, so they cannot drift.
+    """
+    name = worder.get_name_at(resource, offset)
+    this_pymodule = project.get_pymodule(resource)
+    primary, pyname = evaluate.eval_location2(this_pymodule, offset)
+    if pyname is None:
+        return name, primary, None, None
+    pyobject = pyname.get_object()
+    if isinstance(pyobject, pyobjects.PyClass) and "__init__" in pyobject:
+        pyname = pyobject["__init__"]
+        name = "__init__"
+    pyobject = pyname.get_object()
+    others = None
+    if (
+        name == "__init__"
+        and isinstance(pyobject, pyobjects.PyFunction)
+        and isinstance(pyobject.parent, pyobjects.PyClass)
+    ):
+        pyclass = pyobject.parent
+        others = (pyclass.get_name(), pyclass.parent[pyclass.get_name()])
+    return name, primary, pyname, others
+
+
 class ChangeSignature:
     def __init__(self, project, resource, offset):
         self.project = project
@@ -22,24 +52,9 @@ class ChangeSignature:
             )
 
     def _set_name_and_pyname(self):
-        self.name = worder.get_name_at(self.resource, self.offset)
-        this_pymodule = self.project.get_pymodule(self.resource)
-        self.primary, self.pyname = evaluate.eval_location2(this_pymodule, self.offset)
-        if self.pyname is None:
-            return
-        pyobject = self.pyname.get_object()
-        if isinstance(pyobject, pyobjects.PyClass) and "__init__" in pyobject:
-            self.pyname = pyobject["__init__"]
-            self.name = "__init__"
-        pyobject = self.pyname.get_object()
-        self.others = None
-        if (
-            self.name == "__init__"
-            and isinstance(pyobject, pyobjects.PyFunction)
-            and isinstance(pyobject.parent, pyobjects.PyClass)
-        ):
-            pyclass = pyobject.parent
-            self.others = (pyclass.get_name(), pyclass.parent[pyclass.get_name()])
+        (self.name, self.primary, self.pyname, self.others) = (
+            _resolve_signature_target(self.project, self.resource, self.offset)
+        )
 
     def _change_calls(
         self,
@@ -314,11 +329,13 @@ class ArgumentReorderer(_ArgumentChanger):
 
 
 class _ChangeCallsInModule:
-    def __init__(self, project, occurrence_finder, resource, call_changer):
+    def __init__(self, project, occurrence_finder, resource, call_changer,
+                 observer=None):
         self.project = project
         self.occurrence_finder = occurrence_finder
         self.resource = resource
         self.call_changer = call_changer
+        self.observer = observer
 
     def get_changed_module(self):
         word_finder = worder.Worder(self.source)
@@ -328,6 +345,8 @@ class _ChangeCallsInModule:
                 continue
             start, end = occurrence.get_primary_range()
             begin_parens, end_parens = word_finder.get_word_parens_range(end - 1)
+            if self.observer is not None:
+                self.observer(occurrence, self.source[start:end_parens])
             if occurrence.is_called():
                 primary, pyname = occurrence.get_primary_and_pyname()
                 changed_call = self.call_changer.change_call(
