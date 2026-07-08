@@ -234,15 +234,16 @@ class SignatureStepTransformation:
     def projected_definition_info(self):
         """The signature this step produces -- the flow to the next step.
 
-        A step whose edit raises (legacy duplicate-add validation)
-        propagates its input unchanged; the reified condition reports
-        the failure at check time instead.
+        A step whose edit raises -- the legacy duplicate-add
+        validation, or the raw IndexError of an out-of-range reorder
+        or inline -- propagates its input unchanged; the reified
+        condition reports the failure at check time instead.
         """
         if self._projected is None:
             projected = copy.deepcopy(self.input_definition_info)
             try:
                 self.changer.change_definition_info(projected)
-            except exceptions.RefactoringError:
+            except (exceptions.RefactoringError, IndexError):
                 projected = self.input_definition_info
             self._projected = projected
         return self._projected
