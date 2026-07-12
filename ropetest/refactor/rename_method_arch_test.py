@@ -226,6 +226,30 @@ class BehaviorPreservingConditionTest(RenameMethodArchMixin, unittest.TestCase):
         self.assertIsNotNone(condition.violators[0].pyname)
         self.assertIn("new_method", condition.error_string())
 
+    def test_hierarchy_condition_accepts_renaming_to_the_same_name(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        refactoring = self._refactoring(mod, SIMPLE_CLASS, new_name="a_method")
+        refactoring.prepare_for_execution()
+        condition = refactoring.hierarchy_conflict_condition()
+        self.assertTrue(condition.check())
+
+    def test_hierarchy_condition_accepts_no_op_rename_of_overrides(self):
+        code = dedent("""\
+            class A(object):
+                def a_method(self):
+                    pass
+            class B(A):
+                def a_method(self):
+                    pass
+        """)
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(
+            mod, code, new_name="a_method", in_hierarchy=True
+        )
+        refactoring.prepare_for_execution()
+        condition = refactoring.hierarchy_conflict_condition()
+        self.assertTrue(condition.check())
+
     def test_hierarchy_condition_keeps_same_named_classes_apart(self):
         base_code = dedent("""\
             class Base(object):
@@ -533,6 +557,14 @@ class RenameMethodDriverTest(RenameMethodArchMixin, unittest.TestCase):
     def test_fail_on_warning_returns_changes_when_clean(self):
         mod = self._write_module("mod1", SIMPLE_CLASS)
         result = self._driver(mod, SIMPLE_CLASS, arch.FAIL_ON_WARNING).run()
+        self.assertIsNotNone(result.changes)
+        self.assertEqual([], result.warning_results)
+
+    def test_fail_on_warning_accepts_a_no_op_rename(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        result = self._driver(
+            mod, SIMPLE_CLASS, arch.FAIL_ON_WARNING, new_name="a_method"
+        ).run()
         self.assertIsNotNone(result.changes)
         self.assertEqual([], result.warning_results)
 

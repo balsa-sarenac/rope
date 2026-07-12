@@ -93,9 +93,14 @@ class HierarchyDoesNotDefineNameCondition(Condition):
     def _find_violators(self):
         analysis = self.transformation.analysis
         analysis.ensure_ran()
+        renamed_locations = {
+            self.transformation.old_pyname.get_definition_location()
+        }
         classes = [self.transformation.get_pyclass()]
         for occurrence in analysis.defining_occurrences:
-            pyclass = _containing_class(occurrence.get_pyname())
+            pyname = occurrence.get_pyname()
+            renamed_locations.add(pyname.get_definition_location())
+            pyclass = _containing_class(pyname)
             if pyclass is not None:
                 classes.append(pyclass)
         violators = []
@@ -104,7 +109,12 @@ class HierarchyDoesNotDefineNameCondition(Condition):
             attributes = pyclass.get_attributes()
             if self.new_name not in attributes:
                 continue
-            conflict = ConflictingDefinition(attributes[self.new_name], pyclass)
+            definition = attributes[self.new_name]
+            # a definition the rename itself edits holds the new name
+            # legitimately (renaming to the same name), not conflictingly
+            if definition.get_definition_location() in renamed_locations:
+                continue
+            conflict = ConflictingDefinition(definition, pyclass)
             # the defining module disambiguates same-named classes whose
             # conflicting definitions share a line number
             key = (pyclass.get_name(), conflict.module, conflict.lineno)
