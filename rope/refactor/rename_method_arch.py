@@ -105,7 +105,9 @@ class HierarchyDoesNotDefineNameCondition(Condition):
             if self.new_name not in attributes:
                 continue
             conflict = ConflictingDefinition(attributes[self.new_name], pyclass)
-            key = (pyclass.get_name(), conflict.lineno)
+            # the defining module disambiguates same-named classes whose
+            # conflicting definitions share a line number
+            key = (pyclass.get_name(), conflict.module, conflict.lineno)
             if key not in seen:
                 seen.add(key)
                 violators.append(conflict)

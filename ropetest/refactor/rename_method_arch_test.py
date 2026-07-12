@@ -226,6 +226,34 @@ class BehaviorPreservingConditionTest(RenameMethodArchMixin, unittest.TestCase):
         self.assertIsNotNone(condition.violators[0].pyname)
         self.assertIn("new_method", condition.error_string())
 
+    def test_hierarchy_condition_keeps_same_named_classes_apart(self):
+        base_code = dedent("""\
+            class Base(object):
+                def a_method(self):
+                    pass
+        """)
+        subclass_code = dedent("""\
+            import mod1
+            class C(mod1.Base):
+                def a_method(self):
+                    pass
+                def new_method(self):
+                    pass
+        """)
+        mod1 = self._write_module("mod1", base_code)
+        self._write_module("mod2", subclass_code)
+        self._write_module("mod3", subclass_code)
+        refactoring = self._refactoring(mod1, base_code, in_hierarchy=True)
+        refactoring.prepare_for_execution()
+        condition = refactoring.hierarchy_conflict_condition()
+        self.assertFalse(condition.check())
+        # same class name, same conflict line, different modules:
+        # both definitions are distinct violators
+        self.assertEqual(2, len(condition.violators))
+        self.assertNotEqual(
+            condition.violators[0].module, condition.violators[1].module
+        )
+
     def test_hierarchy_condition_finds_conflict_in_superclass(self):
         code = dedent("""\
             class Base(object):
