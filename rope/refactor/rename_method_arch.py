@@ -45,6 +45,7 @@ from rope.refactor.arch import (  # noqa: F401
     RefactoringDriver,
     RefactoringExecutionResult,
     ReflectiveReference,
+    Transformation,
     TransformationDecorator,
     ValidNameCondition,
     check_applicability_preconditions,
@@ -120,7 +121,7 @@ class HierarchyDoesNotDefineNameCondition(Condition):
         )
 
 
-class RenameMethodTransformation:
+class RenameMethodTransformation(Transformation):
     """Behavior-agnostic method rename.
 
     Owns the applicability preconditions and the change-construction
@@ -207,9 +208,6 @@ class RenameMethodTransformation:
             ),
         ]
 
-    def check_preconditions(self):
-        check_applicability_preconditions(self)
-
     def private_transform(self):
         """Construct the `ChangeSet` from the shared occurrence analysis."""
         self.analysis.ensure_ran()
@@ -218,19 +216,6 @@ class RenameMethodTransformation:
             changes.add_change(ChangeContents(file_, new_content))
         self.changes = changes
         return changes
-
-    def generate_changes(self):
-        self.prepare_for_execution()
-        self.check_preconditions()
-        return self.private_transform()
-
-    def perform_changes(self):
-        self.project.do(self.changes)
-
-    def execute(self):
-        self.generate_changes()
-        self.perform_changes()
-        return self.changes
 
 
 class RenameMethodRefactoring(TransformationDecorator):

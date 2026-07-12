@@ -303,7 +303,7 @@ class GenericChangerTransformation(SignatureStepTransformation):
     """
 
 
-class ChangeSignatureTransformation:
+class ChangeSignatureTransformation(arch.Transformation):
     """Behavior-agnostic signature change: a composite over steps.
 
     Applicability is derived from the steps' preconditions by
@@ -392,9 +392,6 @@ class ChangeSignatureTransformation:
             for condition in step.applicability_preconditions()
         ]
 
-    def check_preconditions(self):
-        arch.check_applicability_preconditions(self)
-
     def private_transform(self):
         """Construct the `ChangeSet` from the shared signature analysis."""
         self.analysis.ensure_ran()
@@ -403,19 +400,6 @@ class ChangeSignatureTransformation:
             changes.add_change(ChangeContents(file_, new_content))
         self.changes = changes
         return changes
-
-    def generate_changes(self):
-        self.prepare_for_execution()
-        self.check_preconditions()
-        return self.private_transform()
-
-    def perform_changes(self):
-        self.project.do(self.changes)
-
-    def execute(self):
-        self.generate_changes()
-        self.perform_changes()
-        return self.changes
 
 
 class NoArgumentValueLostCondition(arch.Condition):

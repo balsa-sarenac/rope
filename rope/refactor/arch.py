@@ -292,6 +292,41 @@ class AnalysisCoversAllClientsCondition(Condition):
         )
 
 
+class Transformation:
+    """Boilerplate for a behavior-agnostic transformation.
+
+    The polymorphic core of the three-layer API: subclasses supply
+    `prepare_for_execution()`, `applicability_preconditions()` and
+    `private_transform()`, and must expose `project` and `changes`;
+    the layer composition and execution control are shared.
+    """
+
+    def prepare_for_execution(self):
+        raise NotImplementedError
+
+    def applicability_preconditions(self):
+        raise NotImplementedError
+
+    def private_transform(self):
+        raise NotImplementedError
+
+    def check_preconditions(self):
+        check_applicability_preconditions(self)
+
+    def generate_changes(self):
+        self.prepare_for_execution()
+        self.check_preconditions()
+        return self.private_transform()
+
+    def perform_changes(self):
+        self.project.do(self.changes)
+
+    def execute(self):
+        self.generate_changes()
+        self.perform_changes()
+        return self.changes
+
+
 class TransformationDecorator:
     """Boilerplate for a refactoring decorating a transformation.
 
