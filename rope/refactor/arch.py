@@ -43,6 +43,14 @@ class BehaviorPreservationWarning(exceptions.RefactoringError):
     resumable warning signal; Python has no resumable exceptions, so
     callers that want to proceed anyway use a driver policy or the
     underlying transformation instead of resuming.
+
+    It derives from `RefactoringError` deliberately, so that a caller
+    written against rope's existing interface treats a warning as a
+    refusal rather than missing it.  The cost is that such a caller
+    cannot tell a warning from a hard rejection by type; a caller that
+    needs the distinction uses the driver, which reports the two
+    separately.  Separating the hierarchies would be the stricter
+    choice and would break that compatibility.
     """
 
     def __init__(self, conditions):
@@ -355,6 +363,13 @@ class PendingChanges:
 
     `restore()` drops the pending modules again, and must run whether
     or not the children succeed.
+
+    This reaches into `pycore.module_cache` and
+    `_invalidate_resource_cache`, which rope does not publish.  The
+    view is therefore sound but coupled to the engine's internals: the
+    parts needed to build it exist, which is the portability claim,
+    but they are not a supported interface and an upstream change to
+    the caching strategy would break it.
     """
 
     def __init__(self, project):

@@ -546,8 +546,13 @@ class ChangeSignatureRefactoring(arch.Refactoring):
         super().__init__(ChangeSignatureTransformation(*args, **kwds))
 
     def _build_breaking_change_preconditions(self):
-        # the children must have run: each contributes conditions about
-        # the call sites its own rewrite met
+        # The children must have run: each contributes conditions about
+        # the call sites its own rewrite met, and a call site is only
+        # known once the rewrite has looked for it.  Constructing
+        # changes before consulting the commitments inverts the order
+        # of the reference realization, but not its guarantee: changes
+        # are constructed, never applied, until the caller's policy has
+        # seen the warnings.
         self.transformation.run()
         conditions = [
             self.hierarchy_overrides_condition(),
