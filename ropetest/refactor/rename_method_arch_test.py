@@ -64,6 +64,36 @@ class ConditionTest(RenameMethodArchMixin, unittest.TestCase):
         condition = arch.ValidNameCondition(None)
         self.assertFalse(condition.check())
 
+    def test_negated_condition_holds_when_the_inner_one_fails(self):
+        negated = arch.NegatedCondition(arch.ValidNameCondition("lambda"))
+        self.assertTrue(negated.check())
+        self.assertEqual([], negated.violators)
+
+    def test_negated_condition_fails_when_the_inner_one_holds(self):
+        negated = arch.ValidNameCondition("new_method").not_()
+        self.assertFalse(negated.check())
+        self.assertIn("to fail", negated.error_string())
+
+    def test_negated_condition_reports_non_violators(self):
+        mod = self._write_module("mod1", SIMPLE_CLASS)
+        self._write_module("mod2", "")
+        refactoring = arch.RenameMethodRefactoring(
+            self.project,
+            mod,
+            SIMPLE_CLASS.index("a_method"),
+            "new_method",
+            resources=[mod],
+        )
+        refactoring.prepare_for_execution()
+        coverage = refactoring.analysis_coverage_condition()
+        self.assertFalse(coverage.check())
+        self.assertEqual(
+            ["mod2.py"], [resource.path for resource in coverage.violators]
+        )
+        negated = coverage.not_()
+        self.assertFalse(negated.check())
+        self.assertIn("mod1.py", [r.path for r in negated.violators])
+
     def test_condition_levels(self):
         self.assertEqual(
             arch.APPLICABILITY, arch.ValidNameCondition("x").level
@@ -349,78 +379,6 @@ class BehaviorPreservingConditionTest(RenameMethodArchMixin, unittest.TestCase):
         refactoring = self._refactoring(mod, SIMPLE_CLASS)
         refactoring.prepare_for_execution()
         self.assertTrue(refactoring.unsure_occurrences_condition().check())
-
-    def test_reflective_condition_finds_getattr(self):
-        code = dedent("""\
-            class A(object):
-                def a_method(self):
-                    pass
-            getattr(A(), "a_method")()
-        """)
-        mod = self._write_module("mod1", code)
-        refactoring = self._refactoring(mod, code)
-        refactoring.prepare_for_execution()
-        condition = refactoring.reflective_references_condition()
-        self.assertFalse(condition.check())
-        reference = condition.violators[0]
-        self.assertEqual("getattr", reference.kind)
-        self.assertEqual(4, reference.lineno)
-
-    def test_reflective_condition_finds_methodcaller_and_strings(self):
-        code = dedent("""\
-            from operator import methodcaller
-            class A(object):
-                def a_method(self):
-                    pass
-            call = methodcaller("a_method")
-            name = "a_method"
-        """)
-        mod = self._write_module("mod1", code)
-        refactoring = self._refactoring(mod, code)
-        refactoring.prepare_for_execution()
-        condition = refactoring.reflective_references_condition()
-        self.assertFalse(condition.check())
-        kinds = {reference.kind for reference in condition.violators}
-        self.assertEqual({"methodcaller", "string"}, kinds)
-
-    def test_reflective_condition_passes_with_docs_for_contiguous_strings(self):
-        code = dedent("""\
-            class A(object):
-                def a_method(self):
-                    pass
-            getattr(A(), "a_method")()
-        """)
-        mod = self._write_module("mod1", code)
-        refactoring = self._refactoring(mod, code, docs=True)
-        refactoring.prepare_for_execution()
-        self.assertTrue(refactoring.reflective_references_condition().check())
-
-    def test_reflective_condition_finds_folded_strings_despite_docs(self):
-        code = dedent("""\
-            class A(object):
-                def a_method(self):
-                    pass
-            getattr(A(), "a_" "method")()
-        """)
-        mod = self._write_module("mod1", code)
-        refactoring = self._refactoring(mod, code, docs=True)
-        refactoring.prepare_for_execution()
-        condition = refactoring.reflective_references_condition()
-        self.assertFalse(condition.check())
-        self.assertEqual("getattr", condition.violators[0].kind)
-
-    def test_reflective_condition_finds_folded_strings_without_docs(self):
-        code = dedent("""\
-            class A(object):
-                def a_method(self):
-                    pass
-            getattr(A(), "a_" "method")()
-        """)
-        mod = self._write_module("mod1", code)
-        refactoring = self._refactoring(mod, code)
-        refactoring.prepare_for_execution()
-        condition = refactoring.reflective_references_condition()
-        self.assertFalse(condition.check())
 
     def test_coverage_condition_reports_excluded_files(self):
         mod1 = self._write_module("mod1", SIMPLE_CLASS)

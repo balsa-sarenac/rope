@@ -47,7 +47,7 @@ def steps():
     # late-configuration point the composite exists for.
     return [
         arch_cs.AddParameterRefactoring(3, "header"),
-        arch_cs.ReorderParametersTransformation([0, 1, 3, 2]),
+        arch_cs.ReorderParametersStep([0, 1, 3, 2]),
         arch_cs.RemoveParameterRefactoring(3),
     ]
 
@@ -80,16 +80,17 @@ def main():
     def refactoring():
         return arch_cs.ChangeSignatureRefactoring(project, reports, offset, steps())
 
-    print("=== Parameter flow between the composite's steps ===\n")
+    print("=== Signature flow between the ordered steps ===\n")
     transformation = arch_cs.ChangeSignatureTransformation(
         project, reports, offset, steps()
     )
     transformation.prepare_for_execution()
-    for step in transformation.step_transformations():
+    infos = transformation.definition_infos()
+    for position, step in enumerate(transformation.unwrapped_steps()):
         print(
             f"{type(step).__name__}:"
-            f" {step.input_definition_info.to_string()}"
-            f" -> {step.projected_definition_info().to_string()}"
+            f" {infos[position].to_string()}"
+            f" -> {infos[position + 1].to_string()}"
         )
     print()
 

@@ -1,7 +1,7 @@
 """Demonstration scenario for the method-rename architecture POC.
 
 Builds a small synthetic project with inheritance, duck typing and
-reflective calls, then runs the same method rename:
+duck-typed receivers, then runs the same method rename:
 
 1. at the transformation level (behavior-agnostic),
 2. at the refactoring level (warns, non-resumably),
@@ -43,10 +43,6 @@ CLIENTS = dedent('''\
     def total(shapes):
         # duck typing: rope cannot resolve the receiver statically
         return sum(shape.area() for shape in shapes)
-
-
-    def reflective(shape):
-        return getattr(shape, "area")()
 
 
     square = Square(3)

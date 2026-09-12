@@ -40,13 +40,14 @@ from rope.refactor.arch import (  # noqa: F401
     AnalysisCoversAllClientsCondition,
     BehaviorPreservationWarning,
     Condition,
-    NoReflectiveReferencesCondition,
+    NegatedCondition,
+    OccurrenceAnalysis,
+    TransformationCondition,
     NoUnsureOccurrencesCondition,
     RefactoringDriver,
     RefactoringExecutionResult,
-    ReflectiveReference,
     Transformation,
-    TransformationDecorator,
+    Refactoring,
     ValidNameCondition,
     check_applicability_preconditions,
 )
@@ -71,7 +72,7 @@ def _containing_class(pyname):
     return None
 
 
-class HierarchyDoesNotDefineNameCondition(Condition):
+class HierarchyDoesNotDefineNameCondition(TransformationCondition):
     """The new name does not already resolve in any edited class.
 
     Checks the selected class and every class whose ``def`` header the
@@ -86,8 +87,7 @@ class HierarchyDoesNotDefineNameCondition(Condition):
     level = BEHAVIOR_PRESERVING
 
     def __init__(self, transformation):
-        super().__init__()
-        self.transformation = transformation
+        super().__init__(transformation)
         self.new_name = transformation.new_name
 
     def _find_violators(self):
@@ -230,7 +230,7 @@ class RenameMethodTransformation(Transformation):
         return changes
 
 
-class RenameMethodRefactoring(TransformationDecorator):
+class RenameMethodRefactoring(Refactoring):
     """Behavior-preserving method rename.
 
     A decorator over `RenameMethodTransformation`: it shares the
@@ -255,7 +255,6 @@ class RenameMethodRefactoring(TransformationDecorator):
         return [
             self.hierarchy_conflict_condition(),
             self.unsure_occurrences_condition(),
-            self.reflective_references_condition(),
             self.analysis_coverage_condition(),
         ]
 
@@ -265,9 +264,6 @@ class RenameMethodRefactoring(TransformationDecorator):
     def unsure_occurrences_condition(self):
         return NoUnsureOccurrencesCondition(self.transformation)
 
-    def reflective_references_condition(self):
-        return NoReflectiveReferencesCondition(self.transformation)
-
     def analysis_coverage_condition(self):
         return AnalysisCoversAllClientsCondition(self.transformation)
 
@@ -276,57 +272,38 @@ class RenameMethodRefactoring(TransformationDecorator):
 RenameMethodDriver = RefactoringDriver
 
 
-class _OccurrenceAnalysis:
-    """One shared occurrence-analysis pass over the selected resources.
-
-    Both the behavior-preserving conditions and change construction
-    need rope's occurrence search.  Unsure occurrences are reported
-    only through a callback invoked *during* the search, so warnings
-    cannot be computed cheaper than the full analysis; running the
-    search once here keeps the layered API affordable and records the
-    unsure occurrences as inspectable objects.
-    """
+class _OccurrenceAnalysis(OccurrenceAnalysis):
+    """The rename pass, recording unsure and definition occurrences."""
 
     def __init__(self, transformation):
-        self.transformation = transformation
-        self.unsure_occurrences = []
+        super().__init__(transformation)
         self.defining_occurrences = []
-        self.new_contents = []
-        self._ran = False
 
-    def ensure_ran(self):
-        if self._ran:
-            return
-        # imported here: rope.refactor.rename delegates to this module
-        from rope.refactor.rename import rename_in_module
-
+    def _build_finder(self):
         transformation = self.transformation
-        finder = _DefinitionRecordingFinder(
+        return _DefinitionRecordingFinder(
             occurrences.create_finder(
                 transformation.project,
                 transformation.old_name,
                 transformation.old_pyname,
-                unsure=self._record_unsure,
+                unsure=self.record_unsure,
                 docs=transformation.docs,
                 instance=transformation.old_instance,
                 in_hierarchy=transformation.in_hierarchy,
             ),
             self.defining_occurrences.append,
         )
-        job_set = transformation.task_handle.create_jobset(
-            "Collecting Changes", len(transformation.resources)
-        )
-        for file_ in transformation.resources:
-            job_set.started_job(file_.path)
-            new_content = rename_in_module(
-                finder, transformation.new_name, resource=file_
-            )
-            if new_content is not None:
-                self.new_contents.append((file_, new_content))
-            job_set.finished_job()
-        self._ran = True
 
-    def _record_unsure(self, occurrence):
+    def _rewrite(self, finder, resource):
+        # imported here: rope.refactor.rename delegates to this module
+        from rope.refactor.rename import rename_in_module
+
+        return rename_in_module(
+            finder, self.transformation.new_name, resource=resource
+        )
+
+    def record_unsure(self, occurrence):
+        """Record, then preserve the caller's own `unsure` decision."""
         self.unsure_occurrences.append(occurrence)
         if self.transformation.unsure is None:
             return False

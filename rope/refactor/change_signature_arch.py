@@ -1,35 +1,46 @@
-"""Architecture-facing change signature (research POC): a composite.
+"""Architecture-facing change signature (research POC).
 
-This module retrofits the composite form of the reference
-architecture onto rope's change signature.  A
-`ChangeSignatureTransformation` coordinates a sequence of *step*
-transformations -- one per legacy argument changer -- and derives its
-applicability from theirs instead of re-implementing it.  A
-`ChangeSignatureRefactoring` decorates the composite with
+This module retrofits the reference architecture's *precondition*
+layering onto rope's change signature.  A
+`ChangeSignatureTransformation` coordinates an ordered sequence of
+`SignatureStep` objects -- one per legacy argument changer -- and
+derives its applicability from theirs instead of re-implementing it.
+A `ChangeSignatureRefactoring` decorates the composite with
 behavior-preserving preconditions, some held at the composite level
 (properties of the shared occurrence scope) and some contributed by
 step refactorings (`RemoveParameterRefactoring`,
 `AddParameterRefactoring`).
 
-Two displacements from the reference realization are deliberate:
+**A step is not a transformation.**  It constructs no `ChangeSet` and
+cannot execute; it pairs a legacy `_ArgumentChanger` with the
+applicability conditions that changer never had.  The composite folds
+every changer into one occurrence pass (`_SignatureAnalysis`), which
+is what keeps its output byte-identical to the legacy path: the same
+finder configuration, the same `_FunctionChangers` semantics and the
+same `_ChangeCallsInModule` rewriting run exactly once.
 
-* **Parameter flow instead of intermediate programs.**  Pharo's
-  composite children each edit an in-memory model; rope has no
-  intermediate program model, so the entity flowing between steps is
-  the `DefinitionInfo` a step produces (`projected_definition_info`),
-  and the steps' edit functions are folded into one occurrence pass
-  (`_SignatureAnalysis`).  This also guarantees the composite's
-  `ChangeSet` is byte-identical to the legacy path: the identical
-  finder configuration, the identical `_FunctionChangers` semantics
-  and the identical `_ChangeCallsInModule` rewriting run exactly once.
-* **Late configuration.**  A step cannot be validated up front: its
-  applicability (an index in range, a name not duplicated) is only
-  meaningful against the signature produced by the *prior* steps.  The
-  composite therefore binds each step during its own
-  ``prepare_for_execution`` -- the late-instantiation hook the
-  reference architecture introduced for composition.
+The composite form of the reference architecture -- independently
+executable children, each seeing the previous child's edits -- does
+not transfer, and the reason is a property of the host engine rather
+than of this port.  Pharo composes through `RBNamespace`, a
+change-scoped overlay of the program model that lets child *i+1* read
+child *i*'s pending edits without touching the image.  Rope's change
+model is write-only: a `ChangeSet` is applied by `project.do()` and is
+never a view anything can read back.  Composition of independently
+executable transformations therefore presupposes an abstraction rope
+does not have.  What transfers instead is the layering: ordered
+parameter-level units, each carrying reified conditions checked
+against the signature the prior units produce.
 
-A step whose applicability check fails propagates its input signature
+Late configuration is what makes that checkable.  A step cannot be
+validated up front -- an index in range, a name not duplicated, are
+only meaningful against the signature produced by the *prior* steps --
+so the composite binds each step during its own
+``prepare_for_execution``, the late-instantiation hook the reference
+architecture introduced for composition.  The fold that produces those
+signatures lives in one place, `ChangeSignatureTransformation.definition_infos`.
+
+A step whose changer cannot be applied propagates its input signature
 unchanged, so later index conditions may mis-report alongside the true
 failure; the driver aggregates all failures, so the first reported
 condition is always a real one.
@@ -58,7 +69,15 @@ class SignatureViolation:
         self.definition_info = definition_info
 
 
-class NoDuplicateParameterCondition(arch.Condition):
+class StepCondition(arch.Condition):
+    """A condition over one step, checked against the step's input signature."""
+
+    def __init__(self, step):
+        super().__init__()
+        self.step = step
+
+
+class NoDuplicateParameterCondition(StepCondition):
     """The added parameter name is not already in the signature.
 
     Checked against the signature produced by the prior steps; the
@@ -67,10 +86,6 @@ class NoDuplicateParameterCondition(arch.Condition):
 
     name = "no-duplicate-parameter"
     level = arch.APPLICABILITY
-
-    def __init__(self, step):
-        super().__init__()
-        self.step = step
 
     def _find_violators(self):
         info = self.step.input_definition_info
@@ -84,7 +99,7 @@ class NoDuplicateParameterCondition(arch.Condition):
         return "Adding duplicate parameter: <%s>." % self.step.changer.name
 
 
-class ParameterExistsCondition(arch.Condition):
+class ParameterExistsCondition(StepCondition):
     """The removed index denotes an existing parameter slot.
 
     Replicates exactly the slots `ArgumentRemover` edits: a named
@@ -95,10 +110,6 @@ class ParameterExistsCondition(arch.Condition):
 
     name = "parameter-exists"
     level = arch.APPLICABILITY
-
-    def __init__(self, step):
-        super().__init__()
-        self.step = step
 
     def _find_violators(self):
         info = self.step.input_definition_info
@@ -128,7 +139,7 @@ class ParameterExistsCondition(arch.Condition):
         )
 
 
-class ReorderIndicesValidCondition(arch.Condition):
+class ReorderIndicesValidCondition(StepCondition):
     """Every reorder index denotes an existing named parameter.
 
     The legacy path accepts prefix reorders (fewer indices than
@@ -138,10 +149,6 @@ class ReorderIndicesValidCondition(arch.Condition):
 
     name = "reorder-indices-valid"
     level = arch.APPLICABILITY
-
-    def __init__(self, step):
-        super().__init__()
-        self.step = step
 
     def _find_violators(self):
         info = self.step.input_definition_info
@@ -164,7 +171,7 @@ class ReorderIndicesValidCondition(arch.Condition):
         )
 
 
-class ParameterIndexInRangeCondition(arch.Condition):
+class ParameterIndexInRangeCondition(StepCondition):
     """The inlined index denotes an existing named parameter.
 
     The legacy path crashed with an IndexError during call rewriting;
@@ -173,10 +180,6 @@ class ParameterIndexInRangeCondition(arch.Condition):
 
     name = "parameter-index-in-range"
     level = arch.APPLICABILITY
-
-    def __init__(self, step):
-        super().__init__()
-        self.step = step
 
     def _find_violators(self):
         info = self.step.input_definition_info
@@ -193,76 +196,54 @@ class ParameterIndexInRangeCondition(arch.Condition):
         )
 
 
-class SignatureStepTransformation:
-    """One parameter-level step of a signature change.
+class SignatureStep:
+    """One parameter-level unit of a signature change.
 
-    The step's edit function is a legacy `_ArgumentChanger` instance,
-    wrapped unmodified so the composite's rewrite is the exact legacy
-    rewrite.  Steps are directly instantiable and checkable; they are
-    not independently executable -- executing a single step means
-    running a one-child composite.
+    A step is not a transformation: it has no `private_transform` and
+    constructs no `ChangeSet`.  It pairs a legacy `_ArgumentChanger`
+    -- wrapped unmodified, so the composite's rewrite is the exact
+    legacy rewrite -- with the applicability conditions that changer
+    never had.
 
     ``bind()`` is the late-configuration point: the composite supplies
     the signature produced by the prior steps, which is the only
-    signature this step's preconditions are meaningful against.
+    signature this step's conditions are meaningful against.
     """
 
-    def __init__(self, changer):
-        self.changer = changer
+    changer_class = None
+
+    def __init__(self, *args, changer=None):
+        self.changer = changer if changer is not None else self.changer_class(*args)
         self.composite = None
         self.input_definition_info = None
-        self._projected = None
 
     def bind(self, composite, input_definition_info):
         self.composite = composite
         self.input_definition_info = input_definition_info
-        self._projected = None
-
-    def prepare_for_execution(self):
-        if self.input_definition_info is None:
-            raise exceptions.RefactoringError(
-                "Signature step used before being bound to a composite."
-            )
 
     def applicability_preconditions(self):
         return []
 
     def check_preconditions(self):
-        self.prepare_for_execution()
+        if self.input_definition_info is None:
+            raise exceptions.RefactoringError(
+                "Signature step used before being bound to a composite."
+            )
         arch.check_applicability_preconditions(self)
 
-    def projected_definition_info(self):
-        """The signature this step produces -- the flow to the next step.
 
-        A step whose edit raises -- the legacy duplicate-add
-        validation, or the raw IndexError of an out-of-range reorder
-        or inline -- propagates its input unchanged; the reified
-        condition reports the failure at check time instead.
-        """
-        if self._projected is None:
-            projected = copy.deepcopy(self.input_definition_info)
-            try:
-                self.changer.change_definition_info(projected)
-            except (exceptions.RefactoringError, IndexError):
-                projected = self.input_definition_info
-            self._projected = projected
-        return self._projected
+class NormalizeParametersStep(SignatureStep):
+    changer_class = ArgumentNormalizer
 
 
-class NormalizeParametersTransformation(SignatureStepTransformation):
-    def __init__(self):
-        super().__init__(ArgumentNormalizer())
-
-
-class AddParameterTransformation(SignatureStepTransformation):
+class AddParameterStep(SignatureStep):
     """Add a parameter at `index`.
 
     No index condition: the legacy ``list.insert`` clamps out-of-range
     indices, so every index is applicable.
     """
 
-    def __init__(self, index, name, default=None, value=None):
-        super().__init__(ArgumentAdder(index, name, default, value))
+    changer_class = ArgumentAdder
 
     def applicability_preconditions(self):
         return [
@@ -271,31 +252,28 @@ class AddParameterTransformation(SignatureStepTransformation):
         ]
 
 
-class RemoveParameterTransformation(SignatureStepTransformation):
-    def __init__(self, index):
-        super().__init__(ArgumentRemover(index))
+class RemoveParameterStep(SignatureStep):
+    changer_class = ArgumentRemover
 
     def applicability_preconditions(self):
         return [ParameterExistsCondition(self)]
 
 
-class ReorderParametersTransformation(SignatureStepTransformation):
-    def __init__(self, new_order, autodef=None):
-        super().__init__(ArgumentReorderer(new_order, autodef))
+class ReorderParametersStep(SignatureStep):
+    changer_class = ArgumentReorderer
 
     def applicability_preconditions(self):
         return [ReorderIndicesValidCondition(self)]
 
 
-class InlineParameterDefaultTransformation(SignatureStepTransformation):
-    def __init__(self, index):
-        super().__init__(ArgumentDefaultInliner(index))
+class InlineParameterDefaultStep(SignatureStep):
+    changer_class = ArgumentDefaultInliner
 
     def applicability_preconditions(self):
         return [ParameterIndexInRangeCondition(self)]
 
 
-class GenericChangerTransformation(SignatureStepTransformation):
+class GenericChangerStep(SignatureStep):
     """Compatibility fallback wrapping a custom `_ArgumentChanger`.
 
     Contributes no conditions; an edit-time `RefactoringError` from
@@ -304,7 +282,7 @@ class GenericChangerTransformation(SignatureStepTransformation):
 
 
 class ChangeSignatureTransformation(arch.Transformation):
-    """Behavior-agnostic signature change: a composite over steps.
+    """Behavior-agnostic signature change over ordered parameter steps.
 
     Applicability is derived from the steps' preconditions by
     aggregation, never re-implemented here; the target being a
@@ -338,6 +316,7 @@ class ChangeSignatureTransformation(arch.Transformation):
         self.definition_info = None
         self.changes = None
         self.analysis = None
+        self._definition_info_fold = None
         # protocol attributes for the shared arch conditions
         self.old_name = None
         self.docs = False
@@ -371,16 +350,40 @@ class ChangeSignatureTransformation(arch.Transformation):
             self.resources = self.project.get_python_files()
         else:
             self.resources = self._given_resources
-        state = self.definition_info
-        for step in self.step_transformations():
-            step.bind(self, state)
-            state = step.projected_definition_info()
+        for step, info in zip(self.unwrapped_steps(), self.definition_infos()):
+            step.bind(self, info)
         self.analysis = _SignatureAnalysis(self)
         self._prepared = True
 
-    def step_transformations(self):
+    def unwrapped_steps(self):
         """The steps, refactoring-decorated ones unwrapped."""
         return [getattr(step, "transformation", step) for step in self.steps]
+
+    def definition_infos(self):
+        """The signature each step sees: one fold, computed once.
+
+        Entry *i* is the signature produced by steps ``0..i-1``.  This
+        is the only projection in the module; every step condition
+        reads its input from here, so a condition can never disagree
+        with the signature the composite believes in.
+
+        A changer that cannot be applied to its input -- the legacy
+        duplicate-add validation, the raw `IndexError` of an
+        out-of-range reorder or inline -- contributes its input
+        unchanged, and its own reified condition reports the failure
+        at check time.
+        """
+        if self._definition_info_fold is None:
+            infos = [self.definition_info]
+            for step in self.unwrapped_steps():
+                projected = copy.deepcopy(infos[-1])
+                try:
+                    step.changer.change_definition_info(projected)
+                except (exceptions.RefactoringError, IndexError):
+                    projected = infos[-1]
+                infos.append(projected)
+            self._definition_info_fold = infos
+        return self._definition_info_fold
 
     def is_method(self):
         return isinstance(self.pyfunction.parent, pyobjects.PyClass)
@@ -388,7 +391,7 @@ class ChangeSignatureTransformation(arch.Transformation):
     def applicability_preconditions(self):
         return [
             condition
-            for step in self.step_transformations()
+            for step in self.unwrapped_steps()
             for condition in step.applicability_preconditions()
         ]
 
@@ -402,7 +405,7 @@ class ChangeSignatureTransformation(arch.Transformation):
         return changes
 
 
-class NoArgumentValueLostCondition(arch.Condition):
+class NoArgumentValueLostCondition(StepCondition):
     """No call site supplies a value for the removed parameter.
 
     The legacy rewrite silently drops such a value.  The check replays
@@ -415,10 +418,6 @@ class NoArgumentValueLostCondition(arch.Condition):
     name = "no-argument-value-lost"
     level = arch.BEHAVIOR_PRESERVING
 
-    def __init__(self, step):
-        super().__init__()
-        self.step = step
-
     def _find_violators(self):
         step = self.step
         composite = step.composite
@@ -429,8 +428,9 @@ class NoArgumentValueLostCondition(arch.Condition):
         if not 0 <= index < len(info.args_with_defaults):
             return []
         removed_name = info.args_with_defaults[index][0]
-        position = composite.step_transformations().index(step)
-        changers = analysis.function_changers
+        position = composite.unwrapped_steps().index(step)
+        preceding = composite.unwrapped_steps()[:position]
+        infos = composite.definition_infos()
         violators = []
         for record in analysis.call_records:
             call_info = functionutils.CallInfo.read(
@@ -439,11 +439,10 @@ class NoArgumentValueLostCondition(arch.Condition):
             mapping = functionutils.ArgumentMapping(
                 composite.definition_info, call_info
             )
-            for definition_info, changer in zip(
-                changers.changed_definition_infos[:position],
-                changers.changers[:position],
-            ):
-                changer.change_argument_mapping(definition_info, mapping)
+            for definition_info, preceding_step in zip(infos, preceding):
+                preceding_step.changer.change_argument_mapping(
+                    definition_info, mapping
+                )
             if removed_name in mapping.param_dict:
                 violators.append(record)
         return violators
@@ -460,7 +459,7 @@ class NoArgumentValueLostCondition(arch.Condition):
         )
 
 
-class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
+class CallSitesReceiveRequiredArgumentCondition(StepCondition):
     """Existing calls receive a value for the added parameter.
 
     Holds when the parameter has a default or an injected value;
@@ -471,10 +470,6 @@ class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
 
     name = "call-sites-receive-required-argument"
     level = arch.BEHAVIOR_PRESERVING
-
-    def __init__(self, step):
-        super().__init__()
-        self.step = step
 
     def _find_violators(self):
         changer = self.step.changer
@@ -494,7 +489,7 @@ class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
         )
 
 
-class HierarchyOverridesUpdatedCondition(arch.Condition):
+class HierarchyOverridesUpdatedCondition(arch.TransformationCondition):
     """Every hierarchy definition of the method is updated.
 
     With ``in_hierarchy=False`` only the selected definition is
@@ -512,14 +507,11 @@ class HierarchyOverridesUpdatedCondition(arch.Condition):
 
     _shape_preserving = (ArgumentNormalizer, ArgumentDefaultInliner)
 
-    def __init__(self, transformation):
-        super().__init__()
-        self.transformation = transformation
 
     def _changes_definition_shape(self):
         return any(
             not isinstance(step.changer, self._shape_preserving)
-            for step in self.transformation.step_transformations()
+            for step in self.transformation.unwrapped_steps()
         )
 
     def _find_violators(self):
@@ -559,11 +551,17 @@ class HierarchyOverridesUpdatedCondition(arch.Condition):
         )
 
 
-class RemoveParameterRefactoring(arch.TransformationDecorator):
-    """Behavior-preserving parameter removal (a composite step)."""
+class RemoveParameterRefactoring(arch.Refactoring):
+    """Behavior-preserving parameter removal (a composite step).
 
-    def __init__(self, index):
-        super().__init__(RemoveParameterTransformation(index))
+    Decorates a `SignatureStep`, not a transformation: the step is
+    what carries conditions, and `generate_changes` is the composite's
+    job.  Only the precondition half of the decorator is meaningful
+    here.
+    """
+
+    def __init__(self, *args, changer=None):
+        super().__init__(RemoveParameterStep(*args, changer=changer))
 
     def _build_breaking_change_preconditions(self):
         return [self.argument_value_lost_condition()]
@@ -572,11 +570,14 @@ class RemoveParameterRefactoring(arch.TransformationDecorator):
         return NoArgumentValueLostCondition(self.transformation)
 
 
-class AddParameterRefactoring(arch.TransformationDecorator):
-    """Behavior-preserving parameter addition (a composite step)."""
+class AddParameterRefactoring(arch.Refactoring):
+    """Behavior-preserving parameter addition (a composite step).
 
-    def __init__(self, index, name, default=None, value=None):
-        super().__init__(AddParameterTransformation(index, name, default, value))
+    Decorates a `SignatureStep`; see `RemoveParameterRefactoring`.
+    """
+
+    def __init__(self, *args, changer=None):
+        super().__init__(AddParameterStep(*args, changer=changer))
 
     def _build_breaking_change_preconditions(self):
         return [self.required_argument_condition()]
@@ -585,7 +586,7 @@ class AddParameterRefactoring(arch.TransformationDecorator):
         return CallSitesReceiveRequiredArgumentCondition(self.transformation)
 
 
-class ChangeSignatureRefactoring(arch.TransformationDecorator):
+class ChangeSignatureRefactoring(arch.Refactoring):
     """Behavior-preserving signature change.
 
     Decorates the composite transformation.  The behavior-preserving
@@ -602,7 +603,6 @@ class ChangeSignatureRefactoring(arch.TransformationDecorator):
         conditions = [
             self.hierarchy_overrides_condition(),
             self.unsure_occurrences_condition(),
-            self.reflective_references_condition(),
             self.analysis_coverage_condition(),
         ]
         for step in self.transformation.steps:
@@ -616,47 +616,38 @@ class ChangeSignatureRefactoring(arch.TransformationDecorator):
     def unsure_occurrences_condition(self):
         return arch.NoUnsureOccurrencesCondition(self.transformation)
 
-    def reflective_references_condition(self):
-        return arch.NoReflectiveReferencesCondition(self.transformation)
-
     def analysis_coverage_condition(self):
         return arch.AnalysisCoversAllClientsCondition(self.transformation)
 
 
-def steps_for_changers(changers):
-    """Map legacy argument changers onto composite steps.
+_STEP_CLASSES = [
+    (ArgumentRemover, RemoveParameterRefactoring),
+    (ArgumentAdder, AddParameterRefactoring),
+    (ArgumentReorderer, ReorderParametersStep),
+    (ArgumentDefaultInliner, InlineParameterDefaultStep),
+    (ArgumentNormalizer, NormalizeParametersStep),
+]
 
-    The caller's changer instance is kept as the step's payload --
-    never reconstructed -- so stateful changers
+
+def steps_for_changers(changers):
+    """Wrap legacy argument changers as composite steps.
+
+    The caller's changer instance becomes the step's payload -- never
+    reconstructed -- so stateful changers
     (`ArgumentDefaultInliner.remove`) and custom subclasses behave
-    exactly as on the legacy path.  Adder and remover steps come in
-    their refactoring flavor so non-legacy drivers get their
+    exactly as on the legacy path.  Adder and remover changers get
+    their refactoring flavor so non-legacy drivers see their
     behavior-preserving conditions; the legacy policy never consults
     them.
     """
-    steps = []
-    for changer in changers:
-        step = _step_for_changer(changer)
-        target = getattr(step, "transformation", step)
-        target.changer = changer
-        steps.append(step)
-    return steps
+    return [_step_for_changer(changer) for changer in changers]
 
 
 def _step_for_changer(changer):
-    if isinstance(changer, ArgumentRemover):
-        return RemoveParameterRefactoring(changer.index)
-    if isinstance(changer, ArgumentAdder):
-        return AddParameterRefactoring(
-            changer.index, changer.name, changer.default, changer.value
-        )
-    if isinstance(changer, ArgumentReorderer):
-        return ReorderParametersTransformation(changer.new_order, changer.autodef)
-    if isinstance(changer, ArgumentDefaultInliner):
-        return InlineParameterDefaultTransformation(changer.index)
-    if isinstance(changer, ArgumentNormalizer):
-        return NormalizeParametersTransformation()
-    return GenericChangerTransformation(changer)
+    for changer_class, step_class in _STEP_CLASSES:
+        if isinstance(changer, changer_class):
+            return step_class(changer=changer)
+    return GenericChangerStep(changer=changer)
 
 
 class _CallRecord:
@@ -670,30 +661,21 @@ class _CallRecord:
         self.code = code
 
 
-class _SignatureAnalysis:
-    """One shared occurrence-and-rewrite pass over the selected resources.
+class _SignatureAnalysis(arch.OccurrenceAnalysis):
+    """The change-signature pass, recording unsure and matched calls.
 
     Reproduces the legacy `ChangeSignature._change_calls` pass exactly
     -- the same finder configuration, the same `_FunctionChangers`
     edit chain, the same `_ChangeCallsInModule` rewriting -- so the
-    composite's output is byte-identical to the legacy path.  On top
-    of that pass it records unsure occurrences (through a callback
-    that preserves the legacy match set) and the matched call sites,
-    which the behavior-preserving conditions inspect; as with rename,
-    warnings are never cheaper than the analysis itself.
+    composite's output is byte-identical to the legacy path.
     """
 
     def __init__(self, transformation):
-        self.transformation = transformation
-        self.unsure_occurrences = []
+        super().__init__(transformation)
         self.call_records = []
-        self.new_contents = []
         self.function_changers = None
-        self._ran = False
 
-    def ensure_ran(self):
-        if self._ran:
-            return
+    def _build_finder(self):
         transformation = self.transformation
         finder = occurrences.create_finder(
             transformation.project,
@@ -701,7 +683,7 @@ class _SignatureAnalysis:
             transformation.pyname,
             instance=transformation.primary,
             in_hierarchy=transformation.in_hierarchy and transformation.is_method(),
-            unsure=self._record_unsure,
+            unsure=self.record_unsure,
         )
         if transformation.others:
             name, pyname = transformation.others
@@ -712,29 +694,19 @@ class _SignatureAnalysis:
         self.function_changers = legacy._FunctionChangers(
             transformation.pyfunction,
             transformation.definition_info,
-            [step.changer for step in transformation.step_transformations()],
+            [step.changer for step in transformation.unwrapped_steps()],
         )
-        job_set = transformation.task_handle.create_jobset(
-            "Collecting Changes", len(transformation.resources)
-        )
-        for file_ in transformation.resources:
-            job_set.started_job(file_.path)
-            change_calls = legacy._ChangeCallsInModule(
-                transformation.project,
-                finder,
-                file_,
-                self.function_changers,
-                observer=self._record,
-            )
-            changed = change_calls.get_changed_module()
-            if changed is not None:
-                self.new_contents.append((file_, changed))
-            job_set.finished_job()
-        self._ran = True
+        return finder
 
-    def _record_unsure(self, occurrence):
-        self.unsure_occurrences.append(occurrence)
-        return False
+    def _rewrite(self, finder, resource):
+        change_calls = legacy._ChangeCallsInModule(
+            self.transformation.project,
+            finder,
+            resource,
+            self.function_changers,
+            observer=self._record,
+        )
+        return change_calls.get_changed_module()
 
     def _record(self, occurrence, code):
         if not occurrence.is_called():

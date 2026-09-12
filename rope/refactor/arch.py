@@ -28,7 +28,6 @@ protocol rather than an ABC; the operation must provide:
 * ``docs`` -- whether textual (docs-mode) occurrences are rewritten
 """
 
-import ast
 from keyword import iskeyword
 
 from rope.base import exceptions
@@ -76,6 +75,59 @@ class Condition:
     def error_string(self):
         raise NotImplementedError
 
+    def subjects(self):
+        """Every entity the condition ranges over.
+
+        `violators` is the failing subset; a negated condition needs
+        the complement, so a condition that can be negated must say
+        what it ranged over.
+        """
+        raise NotImplementedError
+
+    def not_(self):
+        return NegatedCondition(self)
+
+
+class NegatedCondition(Condition):
+    """Holds exactly when the condition it wraps fails.
+
+    Mirrors `RBNegatedCondition`: the violators of a negated condition
+    are the *non*-violators of the inner one, so a failure still names
+    the entities responsible rather than only reporting a boolean.
+    """
+
+    def __init__(self, condition):
+        super().__init__()
+        self.condition = condition
+        self.name = "not-" + condition.name
+        self.level = condition.level
+
+    def check(self):
+        self.condition.check()
+        self.violators = list(self.non_violators())
+        return not self.violators
+
+    def non_violators(self):
+        violators = self.condition.violators
+        return [
+            subject for subject in self.condition.subjects()
+            if subject not in violators
+        ]
+
+    def subjects(self):
+        return self.condition.subjects()
+
+    def error_string(self):
+        return f"Expected <{self.condition.name}> to fail, but it held."
+
+
+class TransformationCondition(Condition):
+    """A condition over a whole transformation's execution context."""
+
+    def __init__(self, transformation):
+        super().__init__()
+        self.transformation = transformation
+
 
 class ValidNameCondition(Condition):
     """The target name is structurally valid.
@@ -92,6 +144,9 @@ class ValidNameCondition(Condition):
         super().__init__()
         self.new_name = new_name
         self.require_identifier = require_identifier
+
+    def subjects(self):
+        return [self.new_name]
 
     def _find_violators(self):
         if self.new_name is None:
@@ -116,7 +171,7 @@ class ValidNameCondition(Condition):
         )
 
 
-class NoUnsureOccurrencesCondition(Condition):
+class NoUnsureOccurrencesCondition(TransformationCondition):
     """No occurrence of the searched name has an unresolvable receiver.
 
     Violators are the unsure `Occurrence` objects recorded during the
@@ -126,10 +181,6 @@ class NoUnsureOccurrencesCondition(Condition):
 
     name = "no-unsure-occurrences"
     level = BEHAVIOR_PRESERVING
-
-    def __init__(self, transformation):
-        super().__init__()
-        self.transformation = transformation
 
     def _find_violators(self):
         analysis = self.transformation.analysis
@@ -148,120 +199,7 @@ class NoUnsureOccurrencesCondition(Condition):
         )
 
 
-class ReflectiveReference:
-    """A violator: a reflective or textual reference to the old name."""
-
-    def __init__(self, resource, lineno, kind):
-        self.resource = resource
-        self.lineno = lineno
-        self.kind = kind
-
-
-class NoReflectiveReferencesCondition(Condition):
-    """No reflective or textual reference to the searched name is visible.
-
-    A conservative AST scan for ``getattr``/``setattr``/``hasattr``/
-    ``delattr`` calls, ``methodcaller`` and string constants equal to
-    the searched name.  With ``docs=True`` rope renames textual
-    occurrences itself, but only where the name appears contiguously in
-    the source; references the textual finder cannot see (folded
-    implicit concatenations, escapes) are still reported.  This is a
-    partial approximation of Python's reflection facilities.
-    """
-
-    name = "no-reflective-references"
-    level = BEHAVIOR_PRESERVING
-
-    _reflective_builtins = {"getattr", "setattr", "hasattr", "delattr"}
-
-    def __init__(self, transformation):
-        super().__init__()
-        self.transformation = transformation
-
-    def _find_violators(self):
-        violators = []
-        for resource in self.transformation.resources:
-            source = resource.read()
-            try:
-                tree = ast.parse(source)
-            except SyntaxError:
-                continue
-            violators.extend(self._scan_module(resource, tree, source))
-        return violators
-
-    def _scan_module(self, resource, tree, source):
-        old_name = self.transformation.old_name
-        reflective_arguments = set()
-        violators = []
-        for node in ast.walk(tree):
-            argument = self._match_call(node, old_name)
-            if argument is not None:
-                reflective_arguments.add(id(argument))
-                if self._is_covered_by_docs_rename(argument, source):
-                    continue
-                violators.append(
-                    ReflectiveReference(resource, node.lineno, self._kind(node))
-                )
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Constant)
-                and node.value == old_name
-                and id(node) not in reflective_arguments
-                and not self._is_covered_by_docs_rename(node, source)
-            ):
-                violators.append(ReflectiveReference(resource, node.lineno, "string"))
-        return violators
-
-    def _is_covered_by_docs_rename(self, node, source):
-        """Whether rope's docs-mode textual rename rewrites this constant.
-
-        The textual finder only sees the name written contiguously, so
-        a folded implicit concatenation stays a violator even with
-        ``docs=True``.
-        """
-        if not self.transformation.docs:
-            return False
-        segment = ast.get_source_segment(source, node)
-        return segment is not None and self.transformation.old_name in segment
-
-    def _match_call(self, node, old_name):
-        """Return the string argument node when `node` reflects `old_name`."""
-        if not isinstance(node, ast.Call):
-            return None
-        kind = self._kind(node)
-        if kind in self._reflective_builtins:
-            arg_index = 1
-        elif kind == "methodcaller":
-            arg_index = 0
-        else:
-            return None
-        if len(node.args) <= arg_index:
-            return None
-        argument = node.args[arg_index]
-        if isinstance(argument, ast.Constant) and argument.value == old_name:
-            return argument
-        return None
-
-    def _kind(self, node):
-        function = node.func
-        if isinstance(function, ast.Name):
-            return function.id
-        if isinstance(function, ast.Attribute):
-            return function.attr
-        return None
-
-    def error_string(self):
-        places = ", ".join(
-            f"{reference.resource.path}:{reference.lineno} ({reference.kind})"
-            for reference in self.violators
-        )
-        return (
-            f"'{self.transformation.old_name}' is referenced reflectively"
-            f" or textually and will not be renamed: {places}"
-        )
-
-
-class AnalysisCoversAllClientsCondition(Condition):
+class AnalysisCoversAllClientsCondition(TransformationCondition):
     """The analysis covers every python file of the project.
 
     When `resources` restricts the analysis, clients outside the
@@ -272,17 +210,12 @@ class AnalysisCoversAllClientsCondition(Condition):
     name = "analysis-covers-all-clients"
     level = BEHAVIOR_PRESERVING
 
-    def __init__(self, transformation):
-        super().__init__()
-        self.transformation = transformation
+    def subjects(self):
+        return self.transformation.project.get_python_files()
 
     def _find_violators(self):
         analyzed = set(self.transformation.resources)
-        return [
-            file_
-            for file_ in self.transformation.project.get_python_files()
-            if file_ not in analyzed
-        ]
+        return [file_ for file_ in self.subjects() if file_ not in analyzed]
 
     def error_string(self):
         places = ", ".join(file_.path for file_ in self.violators)
@@ -327,13 +260,17 @@ class Transformation:
         return self.changes
 
 
-class TransformationDecorator:
-    """Boilerplate for a refactoring decorating a transformation.
+class Refactoring(Transformation):
+    """A transformation plus a behavior-preserving commitment.
 
-    Subclasses supply the behavior-preserving commitment through
-    `_build_breaking_change_preconditions()`; everything else --
-    the three-layer API and the delegation to the inner
-    transformation's applicability and change function -- is shared.
+    Mirrors `ReRefactoring`, which both *inherits* the three-layer API
+    from `ReAbstractTransformation` and *holds* a transformation to
+    delegate to.  Inheriting means only the commitment is written here:
+    `generate_changes`, `perform_changes` and `execute` are the shared
+    ones, and they reach the inner transformation through the
+    delegated hooks below.
+
+    Subclasses supply `_build_breaking_change_preconditions()`.
     """
 
     def __init__(self, transformation):
@@ -353,6 +290,9 @@ class TransformationDecorator:
 
     def applicability_preconditions(self):
         return self.transformation.applicability_preconditions()
+
+    def private_transform(self):
+        return self.transformation.private_transform()
 
     def breaking_change_preconditions(self):
         if self._breaking_change_preconditions is None:
@@ -377,21 +317,53 @@ class TransformationDecorator:
         if failed:
             raise BehaviorPreservationWarning(failed)
 
-    def private_transform(self):
-        return self.transformation.private_transform()
 
-    def generate_changes(self):
-        self.prepare_for_execution()
-        self.check_preconditions()
-        return self.private_transform()
+class OccurrenceAnalysis:
+    """One shared occurrence-and-rewrite pass over the selected resources.
 
-    def perform_changes(self):
-        self.transformation.perform_changes()
+    Both operations need the same pass for the same two reasons: the
+    `ChangeSet` is built from it, and the behavior-preserving
+    conditions inspect what it saw.  Rope reports unresolvable
+    receivers through an `unsure` callback invoked *during* the
+    search, so a warning can never be cheaper than the analysis
+    itself; running it once here is what keeps the layered API
+    affordable.
 
-    def execute(self):
-        self.generate_changes()
-        self.perform_changes()
-        return self.changes
+    Subclasses supply `_build_finder()` and `_rewrite()`.
+    """
+
+    def __init__(self, transformation):
+        self.transformation = transformation
+        self.unsure_occurrences = []
+        self.new_contents = []
+        self._ran = False
+
+    def ensure_ran(self):
+        if self._ran:
+            return
+        transformation = self.transformation
+        finder = self._build_finder()
+        job_set = transformation.task_handle.create_jobset(
+            "Collecting Changes", len(transformation.resources)
+        )
+        for file_ in transformation.resources:
+            job_set.started_job(file_.path)
+            new_content = self._rewrite(finder, file_)
+            if new_content is not None:
+                self.new_contents.append((file_, new_content))
+            job_set.finished_job()
+        self._ran = True
+
+    def _build_finder(self):
+        raise NotImplementedError
+
+    def _rewrite(self, finder, resource):
+        raise NotImplementedError
+
+    def record_unsure(self, occurrence):
+        """The `unsure` callback: record, and answer rope's question."""
+        self.unsure_occurrences.append(occurrence)
+        return False
 
 
 def check_applicability_preconditions(operation):
