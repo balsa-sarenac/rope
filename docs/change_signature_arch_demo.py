@@ -50,10 +50,12 @@ def changers():
     # Removing index 3 is invalid against the original three-slot
     # signature; it only becomes applicable after the add changer --
     # the late-configuration point the composite exists for.
+    # the level is a class choice per child: a reorder cannot break
+    # behavior, an add and a remove can
     return [
-        ArgumentAdder(3, "header"),
+        arch_cs.AddParameterRefactoring(ArgumentAdder(3, "header")),
         ArgumentReorderer([0, 1, 3, 2]),
-        ArgumentRemover(3),
+        arch_cs.RemoveParameterRefactoring(ArgumentRemover(3)),
     ]
 
 
@@ -95,7 +97,7 @@ def main():
         transformation.children, transformation.child_transformations()
     ):
         print(
-            f"{type(inner.changer).__name__}"
+            f"{type(inner).__name__}"
             f" [{type(child).__name__}]:"
             f" {inner.definition_info.to_string()}"
         )

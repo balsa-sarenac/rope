@@ -28,16 +28,14 @@ class NegatedCondition {
 class _ArgumentChanger {
     change_definition_info()
     change_argument_mapping()
-    applicability_conditions()
-    breaking_change_conditions()
-}
-
-class ParameterTransformation {
-    changer
-    definition_info
+    configure()
     prepare_for_execution()
     applicability_preconditions()
     private_transform()
+}
+
+class RemoveParameterRefactoring {
+    breaking_change_preconditions()
 }
 
 class ChangeSignatureTransformation {
@@ -48,9 +46,9 @@ class ChangeSignatureTransformation {
 Condition <|-- NegatedCondition
 NegatedCondition --> Condition
 
-_ArgumentChanger --> Condition
-ParameterTransformation --> _ArgumentChanger : changer
-ParameterTransformation --> Condition : its own
-ChangeSignatureTransformation o-- "ordered" ParameterTransformation
+_ArgumentChanger --> Condition : applicability
+RemoveParameterRefactoring --> _ArgumentChanger : decorates
+RemoveParameterRefactoring --> Condition : behavior preserving
+ChangeSignatureTransformation o-- "ordered" _ArgumentChanger
 
 @enduml

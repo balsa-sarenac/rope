@@ -3,6 +3,10 @@ from textwrap import dedent
 
 from rope.base import exceptions
 from rope.refactor import change_signature_arch as arch_cs
+from rope.refactor.change_signature_arch import (
+    NoDuplicateParameterCondition,
+    ParameterExistsCondition,
+)
 from rope.refactor import arch
 from rope.refactor import functionutils
 from rope.refactor.change_signature import (
@@ -57,9 +61,7 @@ class ChangerConditionTest(ChangeSignatureArchMixin, unittest.TestCase):
     """Each argument changer states its own applicability conditions."""
 
     def _check(self, changer, info):
-        arch.check_applicability_preconditions(
-            _Checkable(changer.applicability_conditions(info))
-        )
+        arch.check_applicability_preconditions(_against(changer, info))
 
     def test_remove_of_named_parameter_is_applicable(self):
         self._check(ArgumentRemover(0), _definfo([("p1", None)]))
@@ -69,7 +71,7 @@ class ChangerConditionTest(ChangeSignatureArchMixin, unittest.TestCase):
         changer = ArgumentRemover(2)
         with self.assertRaises(exceptions.RefactoringError):
             self._check(changer, info)
-        condition = changer.applicability_conditions(info)[0]
+        condition = _against(changer, info).applicability_preconditions()[0]
         self.assertFalse(condition.check())
         self.assertEqual(2, condition.violators[0].subject)
 
@@ -86,7 +88,7 @@ class ChangerConditionTest(ChangeSignatureArchMixin, unittest.TestCase):
 
     def test_add_of_duplicate_parameter_is_rejected_with_legacy_message(self):
         info = _definfo([("p1", None)])
-        condition = ArgumentAdder(0, "p1").applicability_conditions(info)[1]
+        condition = _against(ArgumentAdder(0, "p1"), info).applicability_preconditions()[1]
         self.assertFalse(condition.check())
         self.assertEqual(
             "Adding duplicate parameter: <p1>.", condition.error_string()
@@ -113,27 +115,24 @@ class ChangerConditionTest(ChangeSignatureArchMixin, unittest.TestCase):
             self._check(ArgumentDefaultInliner(1), _definfo([("p1", "1")]))
 
     def test_changer_conditions_are_applicability_level(self):
-        conditions = ArgumentRemover(0).applicability_conditions(
-            _definfo([("p1", None)])
-        )
+        conditions = _against(
+            ArgumentRemover(0), _definfo([("p1", None)])
+        ).applicability_preconditions()
         self.assertEqual({arch.APPLICABILITY}, {c.level for c in conditions})
 
     def test_a_changer_without_conditions_contributes_none(self):
         from rope.refactor.change_signature import ArgumentNormalizer
 
         self.assertEqual(
-            [], ArgumentNormalizer().applicability_conditions(_definfo([]))
+            [],
+            _against(ArgumentNormalizer(), _definfo([])).applicability_preconditions(),
         )
 
 
-class _Checkable:
-    """Minimal operation exposing conditions to the shared checker."""
-
-    def __init__(self, conditions):
-        self._conditions = conditions
-
-    def applicability_preconditions(self):
-        return self._conditions
+def _against(changer, info):
+    """A changer holding the signature its conditions read."""
+    changer.definition_info = info
+    return changer
 
 
 class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
@@ -183,11 +182,12 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         self.assertEqual([], transformation.applicability_preconditions())
         transformation.check_preconditions()
         self.assertEqual(
-            [type(c) for c in changers[1].applicability_conditions(
-                transformation.child_transformations()[1].definition_info
-            )],
-            [type(c) for c in transformation.child_transformations()[1]
-             .applicability_preconditions()],
+            [ParameterExistsCondition],
+            [
+                type(c)
+                for c in transformation.child_transformations()[1]
+                .applicability_preconditions()
+            ],
         )
 
     def test_generate_changes_builds_an_ordinary_changeset(self):
@@ -321,7 +321,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [ArgumentRemover(0)]
+            mod, code, [arch_cs.RemoveParameterRefactoring(ArgumentRemover(0))]
         )
         refactoring.prepare_for_execution()
         conditions = [
@@ -344,7 +344,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [ArgumentRemover(0)]
+            mod, code, [arch_cs.RemoveParameterRefactoring(ArgumentRemover(0))]
         )
         refactoring.prepare_for_execution()
         refactoring.check_breaking_change_preconditions()
@@ -358,7 +358,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [ArgumentAdder(0, "p1")]
+            mod, code, [arch_cs.AddParameterRefactoring(ArgumentAdder(0, "p1"))]
         )
         refactoring.prepare_for_execution()
         conditions = [
@@ -378,7 +378,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [ArgumentAdder(0, "p1", "None")]
+            mod, code, [arch_cs.AddParameterRefactoring(ArgumentAdder(0, "p1", "None"))]
         )
         refactoring.prepare_for_execution()
         refactoring.check_breaking_change_preconditions()
@@ -427,7 +427,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         refactoring = self._refactoring(
             mod1,
             code,
-            [ArgumentRemover(0)],
+            [arch_cs.RemoveParameterRefactoring(ArgumentRemover(0))],
             resources=[mod1],
         )
         refactoring.prepare_for_execution()
@@ -446,7 +446,7 @@ class DriverPolicyTest(ChangeSignatureArchMixin, unittest.TestCase):
     def _driver(self, policy):
         mod = self._write_module("mod1", self.WARNING_CODE)
         refactoring = self._refactoring(
-            mod, self.WARNING_CODE, [ArgumentRemover(0)]
+            mod, self.WARNING_CODE, [arch_cs.RemoveParameterRefactoring(ArgumentRemover(0))]
         )
         return arch.RefactoringDriver(refactoring, policy=policy)
 
@@ -516,11 +516,9 @@ class LegacyCompatibilityCharacterizationTest(
         transformation.prepare_for_execution()
         transformation.check_preconditions()
         child = transformation.child_transformations()[0]
-        self.assertIs(changer, child.changer)
+        self.assertIs(changer, child)
         self.assertEqual(
-            [type(c) for c in ArgumentAdder(0, "p3").applicability_conditions(
-                child.definition_info
-            )],
+            [arch.ValidNameCondition, NoDuplicateParameterCondition],
             [type(c) for c in child.applicability_preconditions()],
         )
 

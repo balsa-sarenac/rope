@@ -3,7 +3,7 @@ import copy
 import rope.base.exceptions
 from rope.base import codeanalyze, evaluate, pyobjects, taskhandle, utils, worder
 from rope.base.change import ChangeContents, ChangeSet
-from rope.refactor import functionutils, occurrences
+from rope.refactor import arch, functionutils, occurrences
 
 
 def _resolve_signature_target(project, resource, offset, pending=None):
@@ -230,14 +230,20 @@ class _FunctionChangers:
         return mapping.to_call_info(self.changed_definition_infos[-1]).to_string()
 
 
-class _ArgumentChanger:
-    """An elementary signature edit.
+class _ArgumentChanger(arch.Transformation):
+    """An elementary signature edit, executable on its own.
 
     Besides the two edit functions, a changer states the conditions
-    under which it can be applied (`applicability_conditions`),
-    evaluated against the signature the *preceding* changers produce.
-    What such an edit can break is a commitment of the refactoring
-    that wraps it, not of the edit itself.
+    under which it can be applied, and constructs its own `ChangeSet`
+    -- it is the elementary transformation a composite signature
+    change is built from.  What such an edit can *break* is a
+    commitment of the refactoring wrapping it, not of the edit itself,
+    so a caller composes plain changers for the behavior-agnostic
+    level and decorated ones where it wants the commitment.
+
+    A changer is constructed without execution context, as rope's
+    public API has always allowed; the composite supplies that context
+    through `configure()` before running it.
     """
 
     def change_definition_info(self, definition_info):
@@ -246,9 +252,113 @@ class _ArgumentChanger:
     def change_argument_mapping(self, definition_info, argument_mapping):
         pass
 
-    def applicability_conditions(self, definition_info):
+    def configure(self, project, resource, offset, resources, in_hierarchy, pending):
+        """Late configuration: the composite supplies the context."""
+        self.project = project
+        self.resource = resource
+        self.offset = offset
+        self.resources = resources
+        self.in_hierarchy = in_hierarchy
+        self.pending = pending
+        self.changes = None
+        self.definition_info = None
+        self.call_records = []
+        self.unsure_occurrences = []
+
+    def prepare_for_execution(self):
+        (self.target_name, self.primary, self.pyname, self.others) = (
+            _resolve_signature_target(
+                self.project, self.resource, self.offset, pending=self.pending
+            )
+        )
+        if (
+            self.pyname is None
+            or self.pyname.get_object() is None
+            or not isinstance(self.pyname.get_object(), pyobjects.PyFunction)
+        ):
+            raise rope.base.exceptions.RefactoringError(
+                "Change method signature should be performed on functions"
+            )
+        self.pyfunction = self.pyname.get_object()
+        self.definition_info = functionutils.DefinitionInfo.read(self.pyfunction)
+
+    def is_method(self):
+        return isinstance(self.pyfunction.parent, pyobjects.PyClass)
+
+    def applicability_preconditions(self):
         """Preconditions for constructing a structurally valid edit."""
         return []
+
+    def private_transform(self):
+        finder = self._finder()
+        changers = _FunctionChangers(
+            self.pyfunction, self.definition_info, [self]
+        )
+        changes = ChangeSet("Changing signature of <%s>" % self.target_name)
+        for file_ in self.resources:
+            pymodule = self.pending.pymodule(file_)
+            new_content = self._rewrite(finder, pymodule, changers)
+            if new_content is not None and new_content != pymodule.source_code:
+                changes.add_change(ChangeContents(file_, new_content))
+        self.changes = changes
+        return changes
+
+    def _finder(self):
+        finder = occurrences.create_finder(
+            self.project,
+            self.target_name,
+            self.pyname,
+            instance=self.primary,
+            in_hierarchy=self.in_hierarchy and self.is_method(),
+            unsure=self._record_unsure,
+        )
+        if self.others:
+            name, pyname = self.others
+            constructor_finder = occurrences.create_finder(
+                self.project, name, pyname, only_calls=True
+            )
+            finder = _MultipleFinders([finder, constructor_finder])
+        return finder
+
+    def _record_unsure(self, occurrence):
+        self.unsure_occurrences.append(occurrence)
+        return False
+
+    def _rewrite(self, finder, pymodule, changers):
+        """`_ChangeCallsInModule.get_changed_module`, over the pending view."""
+        source = pymodule.source_code
+        word_finder = worder.Worder(source)
+        collector = codeanalyze.ChangeCollector(source)
+        for occurrence in finder.find_occurrences(pymodule=pymodule):
+            if not occurrence.is_called() and not occurrence.is_defined():
+                continue
+            start, end = occurrence.get_primary_range()
+            begin_parens, end_parens = word_finder.get_word_parens_range(end - 1)
+            call = source[start:end_parens]
+            if occurrence.is_called():
+                primary, pyname = occurrence.get_primary_and_pyname()
+                self.call_records.append(
+                    _CallRecord(
+                        occurrence.resource, occurrence.lineno, primary, pyname, call
+                    )
+                )
+                changed = changers.change_call(primary, pyname, call)
+            else:
+                changed = changers.change_definition(call)
+            if changed is not None:
+                collector.add_change(start, end_parens, changed)
+        return collector.get_changed()
+
+
+class _CallRecord:
+    """A violator: a call site matched by a changer's own pass."""
+
+    def __init__(self, resource, lineno, primary, pyname, code):
+        self.resource = resource
+        self.lineno = lineno
+        self.primary = primary
+        self.pyname = pyname
+        self.code = code
 
 
 class ArgumentNormalizer(_ArgumentChanger):
@@ -284,10 +394,12 @@ class ArgumentRemover(_ArgumentChanger):
             if name in mapping.param_dict:
                 del mapping.param_dict[name]
 
-    def applicability_conditions(self, definition_info):
+    def applicability_preconditions(self):
         from rope.refactor import change_signature_arch as conditions
 
-        return [conditions.ParameterExistsCondition(definition_info, self.index)]
+        return [
+            conditions.ParameterExistsCondition(self.definition_info, self.index)
+        ]
 
 
 class ArgumentAdder(_ArgumentChanger):
@@ -309,13 +421,14 @@ class ArgumentAdder(_ArgumentChanger):
         if self.value is not None:
             mapping.param_dict[self.name] = self.value
 
-    def applicability_conditions(self, definition_info):
-        from rope.refactor import arch
+    def applicability_preconditions(self):
         from rope.refactor import change_signature_arch as conditions
 
         return [
             arch.ValidNameCondition(self.name),
-            conditions.NoDuplicateParameterCondition(definition_info, self.name),
+            conditions.NoDuplicateParameterCondition(
+                self.definition_info, self.name
+            ),
         ]
 
 
@@ -337,11 +450,13 @@ class ArgumentDefaultInliner(_ArgumentChanger):
         if default is not None and name not in mapping.param_dict:
             mapping.param_dict[name] = default
 
-    def applicability_conditions(self, definition_info):
+    def applicability_preconditions(self):
         from rope.refactor import change_signature_arch as conditions
 
         return [
-            conditions.ParameterIndexInRangeCondition(definition_info, self.index)
+            conditions.ParameterIndexInRangeCondition(
+                self.definition_info, self.index
+            )
         ]
 
 
@@ -379,11 +494,13 @@ class ArgumentReorderer(_ArgumentChanger):
                 new_args[index] = (arg, self.autodef)
         definition_info.args_with_defaults = new_args
 
-    def applicability_conditions(self, definition_info):
+    def applicability_preconditions(self):
         from rope.refactor import change_signature_arch as conditions
 
         return [
-            conditions.ReorderIndicesValidCondition(definition_info, self.new_order)
+            conditions.ReorderIndicesValidCondition(
+                self.definition_info, self.new_order
+            )
         ]
 
 

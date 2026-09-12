@@ -203,123 +203,26 @@ class ParameterIndexInRangeCondition(arch.Condition):
         )
 
 
-class ParameterTransformation(arch.Transformation):
-    """One argument changer, executable on its own.
-
-    A child of the composite, and a transformation in its own right:
-    it resolves its target, states its applicability, and constructs
-    its own `ChangeSet`.  It resolves and rewrites against the
-    composite's `PendingChanges` view, so it sees the edits of the
-    children that ran before it.
-    """
-
-    def __init__(self, project, resource, offset, changer, resources, in_hierarchy):
-        self.project = project
-        self.resource = resource
-        self.offset = offset
-        self.changer = changer
-        self.resources = resources
-        self.in_hierarchy = in_hierarchy
-        self.pending = None
-        self.changes = None
-        self.definition_info = None
-        self.call_records = []
-        self.unsure_occurrences = []
-
-    def prepare_for_execution(self):
-        (self.name, self.primary, self.pyname, self.others) = (
-            legacy._resolve_signature_target(
-                self.project, self.resource, self.offset, pending=self.pending
-            )
-        )
-        if (
-            self.pyname is None
-            or self.pyname.get_object() is None
-            or not isinstance(self.pyname.get_object(), pyobjects.PyFunction)
-        ):
-            raise exceptions.RefactoringError(
-                "Change method signature should be performed on functions"
-            )
-        self.pyfunction = self.pyname.get_object()
-        self.definition_info = functionutils.DefinitionInfo.read(self.pyfunction)
-
-    def is_method(self):
-        return isinstance(self.pyfunction.parent, pyobjects.PyClass)
-
-    def applicability_preconditions(self):
-        return _conditions(self.changer, "applicability_conditions", self.definition_info)
-
-    def _finder(self):
-        finder = occurrences.create_finder(
-            self.project,
-            self.name,
-            self.pyname,
-            instance=self.primary,
-            in_hierarchy=self.in_hierarchy and self.is_method(),
-            unsure=self._record_unsure,
-        )
-        if self.others:
-            name, pyname = self.others
-            constructor_finder = occurrences.create_finder(
-                self.project, name, pyname, only_calls=True
-            )
-            finder = legacy._MultipleFinders([finder, constructor_finder])
-        return finder
-
-    def _record_unsure(self, occurrence):
-        self.unsure_occurrences.append(occurrence)
-        return False
-
-    def private_transform(self):
-        finder = self._finder()
-        changers = legacy._FunctionChangers(
-            self.pyfunction, self.definition_info, [self.changer]
-        )
-        changes = ChangeSet("Changing signature of <%s>" % self.name)
-        for file_ in self.resources:
-            pymodule = self.pending.pymodule(file_)
-            new_content = self._rewrite(finder, pymodule, changers)
-            if new_content is not None and new_content != pymodule.source_code:
-                changes.add_change(ChangeContents(file_, new_content))
-        self.changes = changes
-        return changes
-
-    def _rewrite(self, finder, pymodule, changers):
-        """`_ChangeCallsInModule.get_changed_module`, over the pending view."""
-        source = pymodule.source_code
-        word_finder = worder.Worder(source)
-        collector = codeanalyze.ChangeCollector(source)
-        for occurrence in finder.find_occurrences(pymodule=pymodule):
-            if not occurrence.is_called() and not occurrence.is_defined():
-                continue
-            start, end = occurrence.get_primary_range()
-            begin_parens, end_parens = word_finder.get_word_parens_range(end - 1)
-            call = source[start:end_parens]
-            if occurrence.is_called():
-                primary, pyname = occurrence.get_primary_and_pyname()
-                self.call_records.append(
-                    _CallRecord(
-                        occurrence.resource, occurrence.lineno, primary, pyname, call
-                    )
-                )
-                changed = changers.change_call(primary, pyname, call)
-            else:
-                changed = changers.change_definition(call)
-            if changed is not None:
-                collector.add_change(start, end_parens, changed)
-        return collector.get_changed()
-
-
 class ChangeSignatureTransformation(arch.Transformation):
     """A signature change as an ordered sequence of executable children.
 
-    Each child is a `ParameterTransformation` that runs against the
-    `PendingChanges` view the composite carries, so a child is checked
-    and rewritten against the program its predecessors produced --
-    not against the original.  Applicability is therefore checked *by*
-    the children at their own point in the sequence, never aggregated
-    up front against a program that no longer describes what the
-    child will meet.
+    The children are rope's own argument changers, which are
+    elementary transformations: each resolves its target, states its
+    applicability, and constructs its own `ChangeSet`.  They run
+    against the `PendingChanges` view the composite carries, so a
+    child is checked and rewritten against the program its
+    predecessors produced, not against the original.  Applicability is
+    therefore checked *by* the children at their own point in the
+    sequence, never aggregated up front against a program that no
+    longer describes what the child will meet.
+
+    A caller composes plain changers for the behavior-agnostic level
+    and changers wrapped in `RemoveParameterRefactoring` or
+    `AddParameterRefactoring` where it wants the behavior-preserving
+    commitment; the composite runs every child at its transformation
+    level and hoists the refactoring-level commitments to its own
+    decorator.  Choosing the level is therefore a class choice per
+    child, exactly as it is for whole operations.
     """
 
     def __init__(
@@ -353,35 +256,9 @@ class ChangeSignatureTransformation(arch.Transformation):
             if self._given_resources is not None
             else self.project.get_python_files()
         )
-        self.children = [self._child_for(changer) for changer in self.changers]
+        self.children = self.changers
         self._reject_non_functions()
         self._prepared = True
-
-    def _child_for(self, changer):
-        """A child at the level its edit warrants.
-
-        A changer whose edit can break behavior gets a child at the
-        refactoring level, which carries that commitment; the rest are
-        plain transformations.  The composite runs every child at its
-        transformation level and hoists the refactoring-level children's
-        commitments to its own decorator, so the caller's policy -- not
-        the composite -- decides what a warning means.
-        """
-        transformation = ParameterTransformation(
-            self.project,
-            self.resource,
-            self.offset,
-            changer,
-            self.resources,
-            self.in_hierarchy,
-        )
-        flavor = _REFACTORING_FLAVORS.get(type(changer))
-        if flavor is None:
-            for changer_class, candidate in _REFACTORING_FLAVORS.items():
-                if isinstance(changer, changer_class):
-                    flavor = candidate
-                    break
-        return flavor(transformation) if flavor else transformation
 
     def _reject_non_functions(self):
         """The target must be a function before any child runs.
@@ -410,7 +287,14 @@ class ChangeSignatureTransformation(arch.Transformation):
             try:
                 for child in self.children:
                     inner = _transformation_of(child)
-                    inner.pending = pending
+                    inner.configure(
+                        self.project,
+                        self.resource,
+                        self.offset,
+                        self.resources,
+                        self.in_hierarchy,
+                        pending,
+                    )
                     inner.prepare_for_execution()
                     inner.check_preconditions()
                     pending.absorb(inner.private_transform())
@@ -496,7 +380,7 @@ class NoArgumentValueLostCondition(arch.Condition):
 
     def _find_violators(self):
         info = self.child.definition_info
-        index = self.child.changer.index
+        index = self.child.index
         if not 0 <= index < len(info.args_with_defaults):
             return []
         removed_name = info.args_with_defaults[index][0]
@@ -515,7 +399,7 @@ class NoArgumentValueLostCondition(arch.Condition):
             f"{record.resource.path}:{record.lineno}" for record in self.violators
         )
         info = self.child.definition_info
-        name = info.args_with_defaults[self.child.changer.index][0]
+        name = info.args_with_defaults[self.child.index][0]
         return (
             f"Removing parameter <{name}> drops an explicitly passed"
             f" argument at: {places}"
@@ -537,7 +421,7 @@ class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
     def __init__(self, child):
         super().__init__()
         self.child = child
-        self.changer = child.changer
+        self.changer = child
 
     def _find_violators(self):
         if self.changer.default is not None or self.changer.value is not None:
@@ -624,8 +508,8 @@ class HierarchyOverridesUpdatedCondition(arch.Condition):
 class RemoveParameterRefactoring(arch.Refactoring):
     """Behavior-preserving parameter removal.
 
-    Decorates a `ParameterTransformation`, which constructs its own
-    changes; only the commitment is added here.
+    Decorates an argument changer, which constructs its own changes;
+    only the commitment is added here.
     """
 
     def _build_breaking_change_preconditions(self):
@@ -637,12 +521,6 @@ class AddParameterRefactoring(arch.Refactoring):
 
     def _build_breaking_change_preconditions(self):
         return [CallSitesReceiveRequiredArgumentCondition(self.transformation)]
-
-
-_REFACTORING_FLAVORS = {
-    ArgumentRemover: RemoveParameterRefactoring,
-    ArgumentAdder: AddParameterRefactoring,
-}
 
 
 def _transformation_of(child):

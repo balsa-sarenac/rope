@@ -21,7 +21,10 @@ class RenameMethodTransformation
 
 class ChangeSignatureRefactoring
 class ChangeSignatureTransformation
-class ParameterTransformation
+
+class _ArgumentChanger
+class AddParameterRefactoring
+class RemoveParameterRefactoring
 
 class PendingChanges
 
@@ -30,13 +33,18 @@ Refactoring -right-> Transformation : decorates
 
 Refactoring <|-- RenameMethodRefactoring
 Refactoring <|-- ChangeSignatureRefactoring
+Refactoring <|-- AddParameterRefactoring
+Refactoring <|-- RemoveParameterRefactoring
 
 Transformation <|-- RenameMethodTransformation
 Transformation <|-- ChangeSignatureTransformation
-Transformation <|-- ParameterTransformation
+Transformation <|-- _ArgumentChanger
 
-ChangeSignatureTransformation o-- "ordered" ParameterTransformation : children
+ChangeSignatureTransformation o-- "ordered" _ArgumentChanger : children
+AddParameterRefactoring --> _ArgumentChanger
+RemoveParameterRefactoring --> _ArgumentChanger
+
 ChangeSignatureTransformation --> PendingChanges
-ParameterTransformation --> PendingChanges : reads
+_ArgumentChanger --> PendingChanges : reads
 
 @enduml
