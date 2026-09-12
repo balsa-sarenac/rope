@@ -417,6 +417,72 @@ class NoArgumentValueLostCondition(arch.Condition):
         )
 
 
+class RemovedParameterUnusedCondition(arch.Condition):
+    """The method body does not use the removed parameter.
+
+    Removing a parameter the body still reads leaves a name that fails
+    to resolve at runtime; the legacy rewrite never looked at the body.
+    Subjects and violators are the body occurrences of the parameter's
+    name that resolve to that parameter, so the condition can be
+    negated.  A rebinding in the body counts as well: the check is
+    conservative.  Only named-parameter removal is checked, not the
+    ``*args``/``**kwargs`` slots, and only the selected definition is
+    scanned, not hierarchy overrides -- the same limits as
+    `NoArgumentValueLostCondition`.
+    """
+
+    name = "removed-parameter-unused"
+    level = arch.BEHAVIOR_PRESERVING
+
+    def __init__(self, child):
+        super().__init__()
+        self.child = child
+
+    def removed_name(self):
+        info = self.child.definition_info
+        if 0 <= self.child.index < len(info.args_with_defaults):
+            return info.args_with_defaults[self.child.index][0]
+        return None
+
+    def subjects(self):
+        name = self.removed_name()
+        if name is None:
+            return []
+        pyfunction = self.child.pyfunction
+        scope = pyfunction.get_scope()
+        if name not in scope:
+            return []
+        finder = occurrences.create_finder(
+            self.child.project, name, scope[name], imports=False
+        )
+        pymodule = pyfunction.get_module()
+        body_offset = _body_start_offset(pyfunction, pymodule)
+        return [
+            occurrence
+            for occurrence in finder.find_occurrences(pymodule=pymodule)
+            if occurrence.offset >= body_offset
+        ]
+
+    def _find_violators(self):
+        return self.subjects()
+
+    def error_string(self):
+        places = ", ".join(
+            f"{occurrence.resource.path}:{occurrence.lineno}"
+            for occurrence in self.violators
+        )
+        return (
+            f"Removing parameter <{self.removed_name()}> leaves reads"
+            f" of it in the body at: {places}"
+        )
+
+
+def _body_start_offset(pyfunction, pymodule):
+    """The offset of the first body statement; the header ends before it."""
+    first = pyfunction.get_ast().body[0]
+    return pymodule.lines.get_line_start(first.lineno) + first.col_offset
+
+
 class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
     """Existing calls receive a value for the added parameter.
 
@@ -531,7 +597,16 @@ class RemoveParameterRefactoring(arch.Refactoring):
     """
 
     def _build_breaking_change_preconditions(self):
-        return [NoArgumentValueLostCondition(self.transformation)]
+        return [
+            self.argument_value_condition(),
+            self.parameter_unused_condition(),
+        ]
+
+    def argument_value_condition(self):
+        return NoArgumentValueLostCondition(self.transformation)
+
+    def parameter_unused_condition(self):
+        return RemovedParameterUnusedCondition(self.transformation)
 
 
 class AddParameterRefactoring(arch.Refactoring):

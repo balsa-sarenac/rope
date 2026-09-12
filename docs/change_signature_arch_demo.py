@@ -137,6 +137,10 @@ def main():
         "warned hierarchy override kept the old signature:",
         "def render(self, title, footer)" in reports.read(),
     )
+    print(
+        "warned body read of the removed parameter remains:",
+        "{footer}" in reports.read(),
+    )
     project.history.undo()
     print("undone; original restored:", clients.read() == CLIENTS)
     project.close()

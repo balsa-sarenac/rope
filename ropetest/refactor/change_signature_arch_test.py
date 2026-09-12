@@ -352,6 +352,81 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         self.assertEqual(3, record.lineno)
         self.assertIn("mod1.py:3", condition.error_string())
 
+    def _parameter_unused_condition(self, code, index):
+        mod = self._write_module("mod1", code)
+        refactoring = self._refactoring(
+            mod,
+            code,
+            [arch_cs.RemoveParameterRefactoring(ArgumentRemover(index))],
+        )
+        refactoring.prepare_for_execution()
+        (condition,) = [
+            condition
+            for condition in refactoring.breaking_change_preconditions()
+            if condition.name == "removed-parameter-unused"
+        ]
+        return mod, condition
+
+    def test_removed_parameter_read_in_the_body_is_reported(self):
+        code = dedent("""\
+            def a_func(p1, p2):
+                return p1 + p2
+        """)
+        mod, condition = self._parameter_unused_condition(code, 1)
+        self.assertFalse(condition.check())
+        self.assertEqual([2], [occurrence.lineno for occurrence in condition.violators])
+        self.assertEqual(mod, condition.violators[0].resource)
+        self.assertIn("<p2>", condition.error_string())
+        self.assertIn("mod1.py:2", condition.error_string())
+
+    def test_removed_parameter_not_read_in_the_body_is_clean(self):
+        code = dedent("""\
+            def a_func(p1, p2):
+                return p1
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertTrue(condition.check())
+        self.assertEqual([], condition.subjects())
+
+    def test_removed_parameter_rebound_in_the_body_is_reported_conservatively(self):
+        code = dedent("""\
+            def a_func(p1, p2):
+                p2 = 1
+                return p2
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertFalse(condition.check())
+        self.assertEqual([2, 3], [occurrence.lineno for occurrence in condition.violators])
+
+    def test_removed_star_args_slot_is_out_of_scope(self):
+        code = dedent("""\
+            def a_func(p1, *args):
+                return args
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertTrue(condition.check())
+
+    def test_remove_parameter_refactoring_names_both_conditions(self):
+        code = dedent("""\
+            def a_func(p1):
+                pass
+        """)
+        mod = self._write_module("mod1", code)
+        child = arch_cs.RemoveParameterRefactoring(ArgumentRemover(0))
+        refactoring = self._refactoring(mod, code, [child])
+        refactoring.prepare_for_execution()
+        self.assertEqual(
+            ["no-argument-value-lost", "removed-parameter-unused"],
+            [c.name for c in child.breaking_change_preconditions()],
+        )
+        self.assertIs(
+            type(child.argument_value_condition()), arch_cs.NoArgumentValueLostCondition
+        )
+        self.assertIs(
+            type(child.parameter_unused_condition()),
+            arch_cs.RemovedParameterUnusedCondition,
+        )
+
     def test_removed_parameter_never_passed_is_clean(self):
         code = dedent("""\
             def a_func(p1=1):
