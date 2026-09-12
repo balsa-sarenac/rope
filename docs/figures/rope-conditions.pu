@@ -1,0 +1,54 @@
+@startuml
+top to bottom direction
+
+skinparam monochrome true
+skinparam shadowing false
+skinparam roundcorner 0
+skinparam linetype ortho
+skinparam classAttributeIconSize 0
+skinparam nodesep 40
+skinparam ranksep 50
+skinparam dpi 150
+
+hide circle
+
+class Condition {
+    violators
+    check()
+    subjects()
+    error_string()
+    not_()
+}
+
+class NegatedCondition {
+    condition
+    non_violators()
+}
+
+class _ArgumentChanger {
+    change_definition_info()
+    change_argument_mapping()
+    applicability_conditions()
+    breaking_change_conditions()
+}
+
+class ChangeSignatureTransformation {
+    changers
+    definition_infos()
+    applicability_preconditions()
+}
+
+class ChangeSignatureRefactoring {
+    breaking_change_preconditions()
+}
+
+Condition <|-- NegatedCondition
+NegatedCondition --> Condition
+
+_ArgumentChanger --> Condition
+
+ChangeSignatureTransformation o-- "ordered" _ArgumentChanger
+ChangeSignatureTransformation --> Condition : aggregates
+ChangeSignatureRefactoring --> Condition : composite-level
+
+@enduml

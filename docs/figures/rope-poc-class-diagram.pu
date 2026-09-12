@@ -1,0 +1,38 @@
+@startuml
+left to right direction
+
+skinparam monochrome true
+skinparam shadowing false
+skinparam roundcorner 0
+skinparam linetype ortho
+skinparam classAttributeIconSize 0
+skinparam nodesep 45
+skinparam ranksep 55
+skinparam dpi 150
+
+hide circle
+hide empty members
+
+class Refactoring
+class Transformation
+
+class RenameMethodRefactoring
+class RenameMethodTransformation
+
+class ChangeSignatureRefactoring
+class ChangeSignatureTransformation
+
+class _ArgumentChanger
+
+Transformation <|-- Refactoring
+Refactoring -right-> Transformation : decorates
+
+Refactoring <|-- RenameMethodRefactoring
+Refactoring <|-- ChangeSignatureRefactoring
+
+Transformation <|-- RenameMethodTransformation
+Transformation <|-- ChangeSignatureTransformation
+
+ChangeSignatureTransformation o-- "1..* ordered" _ArgumentChanger : changers
+
+@enduml
