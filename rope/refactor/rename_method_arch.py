@@ -42,7 +42,6 @@ from rope.refactor.arch import (  # noqa: F401
     Condition,
     NegatedCondition,
     OccurrenceAnalysis,
-    TransformationCondition,
     NoUnsureOccurrencesCondition,
     RefactoringDriver,
     RefactoringExecutionResult,
@@ -72,7 +71,7 @@ def _containing_class(pyname):
     return None
 
 
-class HierarchyDoesNotDefineNameCondition(TransformationCondition):
+class HierarchyDoesNotDefineNameCondition(Condition):
     """The new name does not already resolve in any edited class.
 
     Checks the selected class and every class whose ``def`` header the
@@ -86,18 +85,18 @@ class HierarchyDoesNotDefineNameCondition(TransformationCondition):
     name = "hierarchy-does-not-define-name"
     level = BEHAVIOR_PRESERVING
 
-    def __init__(self, transformation):
-        super().__init__(transformation)
-        self.new_name = transformation.new_name
+    def __init__(self, analysis, pyclass, old_pyname, new_name):
+        super().__init__()
+        self.analysis = analysis
+        self.pyclass = pyclass
+        self.old_pyname = old_pyname
+        self.new_name = new_name
 
     def _find_violators(self):
-        analysis = self.transformation.analysis
-        analysis.ensure_ran()
-        renamed_locations = {
-            self.transformation.old_pyname.get_definition_location()
-        }
-        classes = [self.transformation.get_pyclass()]
-        for occurrence in analysis.defining_occurrences:
+        self.analysis.ensure_ran()
+        renamed_locations = {self.old_pyname.get_definition_location()}
+        classes = [self.pyclass]
+        for occurrence in self.analysis.defining_occurrences:
             pyname = occurrence.get_pyname()
             renamed_locations.add(pyname.get_definition_location())
             pyclass = _containing_class(pyname)
@@ -259,13 +258,23 @@ class RenameMethodRefactoring(Refactoring):
         ]
 
     def hierarchy_conflict_condition(self):
-        return HierarchyDoesNotDefineNameCondition(self.transformation)
+        transformation = self.transformation
+        return HierarchyDoesNotDefineNameCondition(
+            transformation.analysis,
+            transformation.get_pyclass(),
+            transformation.old_pyname,
+            transformation.new_name,
+        )
 
     def unsure_occurrences_condition(self):
-        return NoUnsureOccurrencesCondition(self.transformation)
+        return NoUnsureOccurrencesCondition(
+            self.transformation.analysis, self.transformation.old_name
+        )
 
     def analysis_coverage_condition(self):
-        return AnalysisCoversAllClientsCondition(self.transformation)
+        return AnalysisCoversAllClientsCondition(
+            self.transformation.project, self.transformation.resources
+        )
 
 
 # Method rename predates the shared driver; the old name stays usable.

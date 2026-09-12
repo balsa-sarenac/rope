@@ -121,14 +121,6 @@ class NegatedCondition(Condition):
         return f"Expected <{self.condition.name}> to fail, but it held."
 
 
-class TransformationCondition(Condition):
-    """A condition over a whole transformation's execution context."""
-
-    def __init__(self, transformation):
-        super().__init__()
-        self.transformation = transformation
-
-
 class ValidNameCondition(Condition):
     """The target name is structurally valid.
 
@@ -171,7 +163,7 @@ class ValidNameCondition(Condition):
         )
 
 
-class NoUnsureOccurrencesCondition(TransformationCondition):
+class NoUnsureOccurrencesCondition(Condition):
     """No occurrence of the searched name has an unresolvable receiver.
 
     Violators are the unsure `Occurrence` objects recorded during the
@@ -182,10 +174,14 @@ class NoUnsureOccurrencesCondition(TransformationCondition):
     name = "no-unsure-occurrences"
     level = BEHAVIOR_PRESERVING
 
+    def __init__(self, analysis, name):
+        super().__init__()
+        self.analysis = analysis
+        self.searched_name = name
+
     def _find_violators(self):
-        analysis = self.transformation.analysis
-        analysis.ensure_ran()
-        return analysis.unsure_occurrences
+        self.analysis.ensure_ran()
+        return self.analysis.unsure_occurrences
 
     def error_string(self):
         places = ", ".join(
@@ -194,12 +190,12 @@ class NoUnsureOccurrencesCondition(TransformationCondition):
         )
         return (
             f"{len(self.violators)} occurrence(s) of"
-            f" '{self.transformation.old_name}' could not be resolved"
+            f" '{self.searched_name}' could not be resolved"
             f" statically: {places}"
         )
 
 
-class AnalysisCoversAllClientsCondition(TransformationCondition):
+class AnalysisCoversAllClientsCondition(Condition):
     """The analysis covers every python file of the project.
 
     When `resources` restricts the analysis, clients outside the
@@ -210,11 +206,16 @@ class AnalysisCoversAllClientsCondition(TransformationCondition):
     name = "analysis-covers-all-clients"
     level = BEHAVIOR_PRESERVING
 
+    def __init__(self, project, resources):
+        super().__init__()
+        self.project = project
+        self.resources = resources
+
     def subjects(self):
-        return self.transformation.project.get_python_files()
+        return self.project.get_python_files()
 
     def _find_violators(self):
-        analyzed = set(self.transformation.resources)
+        analyzed = set(self.resources)
         return [file_ for file_ in self.subjects() if file_ not in analyzed]
 
     def error_string(self):

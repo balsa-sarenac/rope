@@ -69,15 +69,7 @@ class SignatureViolation:
         self.definition_info = definition_info
 
 
-class StepCondition(arch.Condition):
-    """A condition over one step, checked against the step's input signature."""
-
-    def __init__(self, step):
-        super().__init__()
-        self.step = step
-
-
-class NoDuplicateParameterCondition(StepCondition):
+class NoDuplicateParameterCondition(arch.Condition):
     """The added parameter name is not already in the signature.
 
     Checked against the signature produced by the prior steps; the
@@ -87,19 +79,23 @@ class NoDuplicateParameterCondition(StepCondition):
     name = "no-duplicate-parameter"
     level = arch.APPLICABILITY
 
+    def __init__(self, definition_info, name):
+        super().__init__()
+        self.definition_info = definition_info
+        self.parameter_name = name
+
     def _find_violators(self):
-        info = self.step.input_definition_info
-        name = self.step.changer.name
+        info = self.definition_info
         for pair in info.args_with_defaults:
-            if pair[0] == name:
-                return [SignatureViolation(name, info)]
+            if pair[0] == self.parameter_name:
+                return [SignatureViolation(self.parameter_name, info)]
         return []
 
     def error_string(self):
-        return "Adding duplicate parameter: <%s>." % self.step.changer.name
+        return "Adding duplicate parameter: <%s>." % self.parameter_name
 
 
-class ParameterExistsCondition(StepCondition):
+class ParameterExistsCondition(arch.Condition):
     """The removed index denotes an existing parameter slot.
 
     Replicates exactly the slots `ArgumentRemover` edits: a named
@@ -111,9 +107,14 @@ class ParameterExistsCondition(StepCondition):
     name = "parameter-exists"
     level = arch.APPLICABILITY
 
+    def __init__(self, definition_info, index):
+        super().__init__()
+        self.definition_info = definition_info
+        self.index = index
+
     def _find_violators(self):
-        info = self.step.input_definition_info
-        index = self.step.changer.index
+        info = self.definition_info
+        index = self.index
         named_count = len(info.args_with_defaults)
         if 0 <= index < named_count:
             return []
@@ -132,14 +133,14 @@ class ParameterExistsCondition(StepCondition):
         return [SignatureViolation(index, info)]
 
     def error_string(self):
-        info = self.step.input_definition_info
+        info = self.definition_info
         return (
-            f"No parameter at index <{self.step.changer.index}> to remove;"
+            f"No parameter at index <{self.index}> to remove;"
             f" the signature at this step is {info.to_string()}."
         )
 
 
-class ReorderIndicesValidCondition(StepCondition):
+class ReorderIndicesValidCondition(arch.Condition):
     """Every reorder index denotes an existing named parameter.
 
     The legacy path accepts prefix reorders (fewer indices than
@@ -150,10 +151,15 @@ class ReorderIndicesValidCondition(StepCondition):
     name = "reorder-indices-valid"
     level = arch.APPLICABILITY
 
+    def __init__(self, definition_info, new_order):
+        super().__init__()
+        self.definition_info = definition_info
+        self.new_order = new_order
+
     def _find_violators(self):
-        info = self.step.input_definition_info
+        info = self.definition_info
         named_count = len(info.args_with_defaults)
-        new_order = self.step.changer.new_order
+        new_order = self.new_order
         violators = [
             SignatureViolation(index, info)
             for index in new_order
@@ -164,14 +170,14 @@ class ReorderIndicesValidCondition(StepCondition):
         return violators
 
     def error_string(self):
-        info = self.step.input_definition_info
+        info = self.definition_info
         return (
-            f"Invalid parameter ordering <{self.step.changer.new_order}>;"
+            f"Invalid parameter ordering <{self.new_order}>;"
             f" the signature at this step is {info.to_string()}."
         )
 
 
-class ParameterIndexInRangeCondition(StepCondition):
+class ParameterIndexInRangeCondition(arch.Condition):
     """The inlined index denotes an existing named parameter.
 
     The legacy path crashed with an IndexError during call rewriting;
@@ -181,17 +187,21 @@ class ParameterIndexInRangeCondition(StepCondition):
     name = "parameter-index-in-range"
     level = arch.APPLICABILITY
 
+    def __init__(self, definition_info, index):
+        super().__init__()
+        self.definition_info = definition_info
+        self.index = index
+
     def _find_violators(self):
-        info = self.step.input_definition_info
-        index = self.step.changer.index
-        if 0 <= index < len(info.args_with_defaults):
+        info = self.definition_info
+        if 0 <= self.index < len(info.args_with_defaults):
             return []
-        return [SignatureViolation(index, info)]
+        return [SignatureViolation(self.index, info)]
 
     def error_string(self):
-        info = self.step.input_definition_info
+        info = self.definition_info
         return (
-            f"No parameter at index <{self.step.changer.index}> to inline;"
+            f"No parameter at index <{self.index}> to inline;"
             f" the signature at this step is {info.to_string()}."
         )
 
@@ -248,7 +258,9 @@ class AddParameterStep(SignatureStep):
     def applicability_preconditions(self):
         return [
             arch.ValidNameCondition(self.changer.name),
-            NoDuplicateParameterCondition(self),
+            NoDuplicateParameterCondition(
+                self.input_definition_info, self.changer.name
+            ),
         ]
 
 
@@ -256,21 +268,31 @@ class RemoveParameterStep(SignatureStep):
     changer_class = ArgumentRemover
 
     def applicability_preconditions(self):
-        return [ParameterExistsCondition(self)]
+        return [
+            ParameterExistsCondition(self.input_definition_info, self.changer.index)
+        ]
 
 
 class ReorderParametersStep(SignatureStep):
     changer_class = ArgumentReorderer
 
     def applicability_preconditions(self):
-        return [ReorderIndicesValidCondition(self)]
+        return [
+            ReorderIndicesValidCondition(
+                self.input_definition_info, self.changer.new_order
+            )
+        ]
 
 
 class InlineParameterDefaultStep(SignatureStep):
     changer_class = ArgumentDefaultInliner
 
     def applicability_preconditions(self):
-        return [ParameterIndexInRangeCondition(self)]
+        return [
+            ParameterIndexInRangeCondition(
+                self.input_definition_info, self.changer.index
+            )
+        ]
 
 
 class GenericChangerStep(SignatureStep):
@@ -317,9 +339,6 @@ class ChangeSignatureTransformation(arch.Transformation):
         self.changes = None
         self.analysis = None
         self._definition_info_fold = None
-        # protocol attributes for the shared arch conditions
-        self.old_name = None
-        self.docs = False
         self._prepared = False
 
     def prepare_for_execution(self):
@@ -343,7 +362,6 @@ class ChangeSignatureTransformation(arch.Transformation):
             raise exceptions.RefactoringError(
                 "Change method signature should be performed on functions"
             )
-        self.old_name = self.name
         self.pyfunction = self.pyname.get_object()
         self.definition_info = functionutils.DefinitionInfo.read(self.pyfunction)
         if self._given_resources is None:
@@ -405,7 +423,7 @@ class ChangeSignatureTransformation(arch.Transformation):
         return changes
 
 
-class NoArgumentValueLostCondition(StepCondition):
+class NoArgumentValueLostCondition(arch.Condition):
     """No call site supplies a value for the removed parameter.
 
     The legacy rewrite silently drops such a value.  The check replays
@@ -417,6 +435,13 @@ class NoArgumentValueLostCondition(StepCondition):
 
     name = "no-argument-value-lost"
     level = arch.BEHAVIOR_PRESERVING
+
+    def __init__(self, step):
+        """Takes the step itself: the replay needs the whole composite
+        context -- every preceding step's changer and the signature it
+        saw -- so no narrower subject would be honest."""
+        super().__init__()
+        self.step = step
 
     def _find_violators(self):
         step = self.step
@@ -459,7 +484,7 @@ class NoArgumentValueLostCondition(StepCondition):
         )
 
 
-class CallSitesReceiveRequiredArgumentCondition(StepCondition):
+class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
     """Existing calls receive a value for the added parameter.
 
     Holds when the parameter has a default or an injected value;
@@ -471,25 +496,28 @@ class CallSitesReceiveRequiredArgumentCondition(StepCondition):
     name = "call-sites-receive-required-argument"
     level = arch.BEHAVIOR_PRESERVING
 
+    def __init__(self, analysis, changer):
+        super().__init__()
+        self.analysis = analysis
+        self.changer = changer
+
     def _find_violators(self):
-        changer = self.step.changer
-        if changer.default is not None or changer.value is not None:
+        if self.changer.default is not None or self.changer.value is not None:
             return []
-        analysis = self.step.composite.analysis
-        analysis.ensure_ran()
-        return list(analysis.call_records)
+        self.analysis.ensure_ran()
+        return list(self.analysis.call_records)
 
     def error_string(self):
         places = ", ".join(
             f"{record.resource.path}:{record.lineno}" for record in self.violators
         )
         return (
-            f"Added parameter <{self.step.changer.name}> has no default"
+            f"Added parameter <{self.changer.name}> has no default"
             f" and no value; existing calls would fail at: {places}"
         )
 
 
-class HierarchyOverridesUpdatedCondition(arch.TransformationCondition):
+class HierarchyOverridesUpdatedCondition(arch.Condition):
     """Every hierarchy definition of the method is updated.
 
     With ``in_hierarchy=False`` only the selected definition is
@@ -507,6 +535,11 @@ class HierarchyOverridesUpdatedCondition(arch.TransformationCondition):
 
     _shape_preserving = (ArgumentNormalizer, ArgumentDefaultInliner)
 
+    def __init__(self, transformation):
+        """Takes the transformation: the check ranges over its target,
+        its hierarchy, its resources and its steps at once."""
+        super().__init__()
+        self.transformation = transformation
 
     def _changes_definition_shape(self):
         return any(
@@ -583,7 +616,10 @@ class AddParameterRefactoring(arch.Refactoring):
         return [self.required_argument_condition()]
 
     def required_argument_condition(self):
-        return CallSitesReceiveRequiredArgumentCondition(self.transformation)
+        step = self.transformation
+        return CallSitesReceiveRequiredArgumentCondition(
+            step.composite.analysis, step.changer
+        )
 
 
 class ChangeSignatureRefactoring(arch.Refactoring):
@@ -614,10 +650,14 @@ class ChangeSignatureRefactoring(arch.Refactoring):
         return HierarchyOverridesUpdatedCondition(self.transformation)
 
     def unsure_occurrences_condition(self):
-        return arch.NoUnsureOccurrencesCondition(self.transformation)
+        return arch.NoUnsureOccurrencesCondition(
+            self.transformation.analysis, self.transformation.name
+        )
 
     def analysis_coverage_condition(self):
-        return arch.AnalysisCoversAllClientsCondition(self.transformation)
+        return arch.AnalysisCoversAllClientsCondition(
+            self.transformation.project, self.transformation.resources
+        )
 
 
 _STEP_CLASSES = [
