@@ -522,7 +522,15 @@ class LegacyCompatibilityCharacterizationTest(
             [type(c) for c in child.applicability_preconditions()],
         )
 
-    def test_a_changer_outside_the_hierarchy_contributes_no_conditions(self):
+    def test_children_must_come_from_ropes_changer_hierarchy(self):
+        """`get_changes` documents `changers` as `_ArgumentChanger`s.
+
+        An object outside that hierarchy provides the two edit
+        functions but cannot act as a composite child, which resolves
+        its own target and constructs its own changes.  The legacy
+        folded pass tolerated such an object; composition does not.
+        """
+
         class Custom:
             def change_definition_info(self, definition_info):
                 pass
@@ -531,11 +539,10 @@ class LegacyCompatibilityCharacterizationTest(
                 pass
 
         mod = self._write_module("mod1", TWO_PARAMS)
-        changer = Custom()
-        transformation = self._transformation(mod, TWO_PARAMS, [changer])
+        transformation = self._transformation(mod, TWO_PARAMS, [Custom()])
         transformation.prepare_for_execution()
-        self.assertIs(changer, transformation.changers[0])
-        self.assertEqual([], transformation.applicability_preconditions())
+        with self.assertRaises(AttributeError):
+            transformation.check_preconditions()
 
 
 if __name__ == "__main__":

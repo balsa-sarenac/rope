@@ -238,6 +238,8 @@ class Transformation:
     the layer composition and execution control are shared.
     """
 
+    checked_applicability = ()
+
     def prepare_for_execution(self):
         raise NotImplementedError
 
@@ -248,7 +250,17 @@ class Transformation:
         raise NotImplementedError
 
     def check_preconditions(self):
-        check_applicability_preconditions(self)
+        self.checked_applicability = check_applicability_preconditions(self)
+
+    def internally_checked_preconditions(self):
+        """Conditions this operation checked itself, if any.
+
+        A composite checks each child's applicability during
+        execution, at the child's own point in the sequence, so those
+        conditions never pass through the driver's own gate; reporting
+        them here keeps the driver's result complete.
+        """
+        return []
 
     def generate_changes(self):
         self.prepare_for_execution()
@@ -297,6 +309,9 @@ class Refactoring(Transformation):
 
     def private_transform(self):
         return self.transformation.private_transform()
+
+    def internally_checked_preconditions(self):
+        return self.transformation.internally_checked_preconditions()
 
     def breaking_change_preconditions(self):
         if self._breaking_change_preconditions is None:
@@ -434,16 +449,18 @@ class OccurrenceAnalysis:
 
 
 def check_applicability_preconditions(operation):
-    """Check and hard-fail: applicability violations stop the operation."""
-    failed = [
-        condition
-        for condition in operation.applicability_preconditions()
-        if not condition.check()
-    ]
+    """Check and hard-fail: applicability violations stop the operation.
+
+    Returns the conditions checked, so a caller that needs to report
+    them keeps the instances whose `violators` were populated.
+    """
+    conditions = operation.applicability_preconditions()
+    failed = [condition for condition in conditions if not condition.check()]
     if failed:
         raise exceptions.RefactoringError(
             "\n".join(condition.error_string() for condition in failed)
         )
+    return conditions
 
 
 LEGACY = "legacy"
@@ -513,5 +530,8 @@ class RefactoringDriver:
                 )
         changes = refactoring.private_transform()
         return RefactoringExecutionResult(
-            changes, applicability, warnings, self.policy
+            changes,
+            applicability + refactoring.internally_checked_preconditions(),
+            warnings,
+            self.policy,
         )

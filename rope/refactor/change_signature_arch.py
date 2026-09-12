@@ -1,51 +1,40 @@
 """Architecture-facing change signature (research POC).
 
-This module retrofits the reference architecture's *precondition*
-layering onto rope's change signature.  It introduces no parallel
+This module realizes the *composite* form of the reference
+architecture over rope's change signature.  It introduces no parallel
 object model: the composite's children are rope's own
-`_ArgumentChanger` instances, which now state their own applicability
-and behavior-preserving conditions (see
-`rope.refactor.change_signature`).  A `ChangeSignatureTransformation`
-orders them and derives its applicability from theirs instead of
-re-implementing it; a `ChangeSignatureRefactoring` decorates the
-composite with behavior-preserving conditions, some held at the
-composite level (properties of the shared occurrence scope) and some
-contributed by the changers themselves.
+`_ArgumentChanger` instances, promoted to transformations in
+`rope.refactor.change_signature`.  Each child states its own
+applicability, resolves its own target and constructs its own
+`ChangeSet`.
 
-The composite form of the reference architecture -- independently
-executable children, each seeing the previous child's edits -- does
-not transfer, and the reason is a property of the host engine rather
-than of this port.  Pharo composes through `RBNamespace`, a
-change-scoped overlay of the program model that lets child *i+1* read
-child *i*'s pending edits without touching the image.  Rope's change
-model is write-only: a `ChangeSet` is applied by `project.do()` and is
-never a view anything can read back.  Composition of independently
-executable transformations therefore presupposes an abstraction rope
-does not have.  What transfers instead is the layering: ordered
-parameter-level edits, each carrying reified conditions checked
-against the signature the prior edits produce, folded into one
-occurrence pass (`_SignatureAnalysis`).  That fold is also what keeps
-the output byte-identical to the legacy path: the same finder
-configuration, the same `_FunctionChangers` semantics and the same
-`_ChangeCallsInModule` rewriting run exactly once.
+`ChangeSignatureTransformation` orders the children and executes them
+one after another against an `arch.PendingChanges` view, so a child is
+checked and rewritten against the program its predecessors produced
+rather than against the original.  Applicability is therefore checked
+*by* the children at their own point in the sequence and is never
+aggregated up front: aggregation is unsound whenever one child's
+applicability depends on what an earlier child creates.  The composite
+keeps one check of its own -- that the target is a function.
 
-Late configuration is what makes the conditions checkable.  A changer
-cannot be validated up front -- an index in range, a name not
-duplicated, are only meaningful against the signature produced by the
-*prior* changers -- so the composite supplies each changer that
-signature when it asks for its conditions.  The fold that produces
-them lives in one place,
-`ChangeSignatureTransformation.definition_infos`.
+The behavioral level is a class choice per child.  A plain changer is
+a transformation; a changer wrapped in `AddParameterRefactoring` or
+`RemoveParameterRefactoring` is a refactoring carrying the
+corresponding commitment, and a composite may mix the two as the
+reference realization does.  The composite runs every child at its
+transformation level and hoists the refactoring-level children's
+commitments into `ChangeSignatureRefactoring`, so the caller's policy
+decides once what a warning means.  `ChangeSignature.get_changes`
+passes plain changers, which is why the compatibility interface is
+unaffected.
 
-A changer that cannot be applied propagates its input signature
-unchanged, so later index conditions may mis-report alongside the true
-failure; the driver aggregates all failures, so the first reported
-condition is always a real one.
+A changer that cannot be applied raises at its own check, so the
+sequence stops at the first genuine failure rather than reporting
+later children against a signature that was never produced.
 """
 
-import copy
 
-from rope.base import codeanalyze, exceptions, pyobjects, taskhandle, worder
+from rope.base import exceptions, pyobjects, taskhandle
 from rope.base.change import ChangeContents, ChangeSet
 from rope.refactor import arch, functionutils, occurrences
 from rope.refactor import change_signature as legacy
@@ -263,10 +252,9 @@ class ChangeSignatureTransformation(arch.Transformation):
     def _reject_non_functions(self):
         """The target must be a function before any child runs.
 
-        The composite's only hard applicability check, exactly as
-        method-ness is for the rename transformation.  Everything else
-        is checked by the children, each against the program its
-        predecessors produced.
+        A preparation failure, not a reified condition, mirroring the
+        rename transformation's method check and the reference
+        realization's `refactoringError` during `prepareForExecution`.
         """
         _, _, pyname, _ = legacy._resolve_signature_target(
             self.project, self.resource, self.offset
@@ -348,8 +336,24 @@ class ChangeSignatureTransformation(arch.Transformation):
         ]
 
     def applicability_preconditions(self):
-        """None: each child states and checks its own."""
+        """None: each child states and checks its own.
+
+        The children's conditions are deliberately absent here: a
+        child's applicability is meaningful against the program its
+        predecessors produce, so checking them from this list -- up
+        front, against the original -- would reject sequences that in
+        fact succeed.  What they checked is reported through
+        `internally_checked_preconditions`.
+        """
         return []
+
+    def internally_checked_preconditions(self):
+        """What the children checked, each at its own point."""
+        return [
+            condition
+            for child in self.child_transformations()
+            for condition in child.checked_applicability
+        ]
 
     def check_preconditions(self):
         self.run()
