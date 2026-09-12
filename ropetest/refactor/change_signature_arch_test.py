@@ -7,7 +7,9 @@ from rope.refactor import arch
 from rope.refactor import functionutils
 from rope.refactor.change_signature import (
     ArgumentAdder,
+    ArgumentDefaultInliner,
     ArgumentRemover,
+    ArgumentReorderer,
     ChangeSignature,
 )
 from ropetest import testutils
@@ -27,14 +29,14 @@ class ChangeSignatureArchMixin:
         module.write(code)
         return module
 
-    def _transformation(self, module, code, steps, **kwds):
+    def _transformation(self, module, code, changers, **kwds):
         return arch_cs.ChangeSignatureTransformation(
-            self.project, module, code.index("a_func") + 1, steps, **kwds
+            self.project, module, code.index("a_func") + 1, changers, **kwds
         )
 
-    def _refactoring(self, module, code, steps, **kwds):
+    def _refactoring(self, module, code, changers, **kwds):
         return arch_cs.ChangeSignatureRefactoring(
-            self.project, module, code.index("a_func") + 1, steps, **kwds
+            self.project, module, code.index("a_func") + 1, changers, **kwds
         )
 
 
@@ -51,92 +53,87 @@ TWO_PARAMS = dedent("""\
 """)
 
 
-class StepConditionTest(ChangeSignatureArchMixin, unittest.TestCase):
-    def _bound(self, step, info):
-        step.bind(None, info)
-        return step
+class ChangerConditionTest(ChangeSignatureArchMixin, unittest.TestCase):
+    """Each argument changer states its own applicability conditions."""
 
-    def test_unbound_step_cannot_be_checked(self):
-        step = arch_cs.RemoveParameterStep(0)
-        with self.assertRaises(exceptions.RefactoringError):
-            step.check_preconditions()
+    def _check(self, changer, info):
+        arch.check_applicability_preconditions(
+            _Checkable(changer.applicability_conditions(info))
+        )
 
     def test_remove_of_named_parameter_is_applicable(self):
-        step = self._bound(
-            arch_cs.RemoveParameterStep(0), _definfo([("p1", None)])
-        )
-        step.check_preconditions()
+        self._check(ArgumentRemover(0), _definfo([("p1", None)]))
 
     def test_remove_of_missing_parameter_is_rejected(self):
-        step = self._bound(
-            arch_cs.RemoveParameterStep(2), _definfo([("p1", None)])
-        )
+        info = _definfo([("p1", None)])
+        changer = ArgumentRemover(2)
         with self.assertRaises(exceptions.RefactoringError):
-            step.check_preconditions()
-        condition = step.applicability_preconditions()[0]
+            self._check(changer, info)
+        condition = changer.applicability_conditions(info)[0]
         self.assertFalse(condition.check())
         self.assertEqual(2, condition.violators[0].subject)
 
     def test_remove_of_star_args_slot_is_applicable(self):
-        step = self._bound(
-            arch_cs.RemoveParameterStep(1),
-            _definfo([("p1", None)], args_arg="args"),
+        self._check(
+            ArgumentRemover(1), _definfo([("p1", None)], args_arg="args")
         )
-        step.check_preconditions()
 
     def test_remove_of_keywords_slot_is_applicable(self):
-        step = self._bound(
-            arch_cs.RemoveParameterStep(2),
+        self._check(
+            ArgumentRemover(2),
             _definfo([("p1", None)], args_arg="args", keywords_arg="kwds"),
         )
-        step.check_preconditions()
 
     def test_add_of_duplicate_parameter_is_rejected_with_legacy_message(self):
-        step = self._bound(
-            arch_cs.AddParameterStep(0, "p1"), _definfo([("p1", None)])
-        )
-        condition = step.applicability_preconditions()[1]
+        info = _definfo([("p1", None)])
+        condition = ArgumentAdder(0, "p1").applicability_conditions(info)[1]
         self.assertFalse(condition.check())
         self.assertEqual(
             "Adding duplicate parameter: <p1>.", condition.error_string()
         )
 
     def test_add_of_keyword_named_parameter_is_rejected(self):
-        step = self._bound(
-            arch_cs.AddParameterStep(0, "lambda"), _definfo([])
-        )
         with self.assertRaises(exceptions.RefactoringError):
-            step.check_preconditions()
+            self._check(ArgumentAdder(0, "lambda"), _definfo([]))
 
     def test_reorder_with_invalid_index_is_rejected(self):
-        step = self._bound(
-            arch_cs.ReorderParametersStep([1, 0, 2]),
-            _definfo([("p1", None), ("p2", None)]),
-        )
         with self.assertRaises(exceptions.RefactoringError):
-            step.check_preconditions()
+            self._check(
+                ArgumentReorderer([1, 0, 2]),
+                _definfo([("p1", None), ("p2", None)]),
+            )
 
     def test_reorder_of_a_prefix_is_applicable(self):
-        step = self._bound(
-            arch_cs.ReorderParametersStep([0]),
-            _definfo([("p1", None), ("p2", None)]),
+        self._check(
+            ArgumentReorderer([0]), _definfo([("p1", None), ("p2", None)])
         )
-        step.check_preconditions()
 
     def test_inline_of_missing_parameter_is_rejected(self):
-        step = self._bound(
-            arch_cs.InlineParameterDefaultStep(1),
-            _definfo([("p1", "1")]),
-        )
         with self.assertRaises(exceptions.RefactoringError):
-            step.check_preconditions()
+            self._check(ArgumentDefaultInliner(1), _definfo([("p1", "1")]))
 
-    def test_step_conditions_are_applicability_level(self):
-        step = self._bound(
-            arch_cs.RemoveParameterStep(0), _definfo([("p1", None)])
+    def test_changer_conditions_are_applicability_level(self):
+        conditions = ArgumentRemover(0).applicability_conditions(
+            _definfo([("p1", None)])
         )
-        levels = {c.level for c in step.applicability_preconditions()}
-        self.assertEqual({arch.APPLICABILITY}, levels)
+        self.assertEqual({arch.APPLICABILITY}, {c.level for c in conditions})
+
+    def test_a_changer_without_conditions_contributes_none(self):
+        from rope.refactor.change_signature import ArgumentNormalizer
+
+        self.assertEqual(
+            [], ArgumentNormalizer().applicability_conditions(_definfo([]))
+        )
+
+
+class _Checkable:
+    """Minimal operation exposing conditions to the shared checker."""
+
+    def __init__(self, conditions):
+        self._conditions = conditions
+
+    def applicability_preconditions(self):
+        return self._conditions
 
 
 class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
@@ -147,45 +144,48 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         with self.assertRaises(exceptions.RefactoringError):
             transformation.prepare_for_execution()
 
-    def test_late_configuration_binds_each_step_to_prior_output(self):
+    def test_each_changer_is_checked_against_its_predecessors_output(self):
         mod = self._write_module("mod1", TWO_PARAMS)
-        steps = [
-            arch_cs.AddParameterStep(2, "p3"),
-            arch_cs.ReorderParametersStep([1, 0, 2]),
+        changers = [
+            ArgumentAdder(2, "p3"),
+            ArgumentReorderer([1, 0, 2]),
         ]
-        transformation = self._transformation(mod, TWO_PARAMS, steps)
+        transformation = self._transformation(mod, TWO_PARAMS, changers)
         transformation.prepare_for_execution()
         transformation.check_preconditions()
         self.assertEqual(
             ["p1", "p2", "p3"],
-            [pair[0] for pair in steps[1].input_definition_info.args_with_defaults],
+            [
+                pair[0]
+                for pair in transformation.definition_infos()[1].args_with_defaults
+            ],
         )
 
     def test_step_invalid_against_original_signature_is_rejected(self):
         mod = self._write_module("mod1", TWO_PARAMS)
-        steps = [arch_cs.ReorderParametersStep([1, 0, 2])]
+        steps = [ArgumentReorderer([1, 0, 2])]
         transformation = self._transformation(mod, TWO_PARAMS, steps)
         transformation.prepare_for_execution()
         with self.assertRaises(exceptions.RefactoringError):
             transformation.check_preconditions()
 
-    def test_applicability_is_aggregated_from_the_steps(self):
+    def test_applicability_is_aggregated_from_the_changers(self):
         mod = self._write_module("mod1", TWO_PARAMS)
-        steps = [
-            arch_cs.AddParameterStep(2, "p3"),
-            arch_cs.RemoveParameterStep(0),
+        changers = [
+            ArgumentAdder(2, "p3"),
+            ArgumentRemover(0),
         ]
-        transformation = self._transformation(mod, TWO_PARAMS, steps)
+        transformation = self._transformation(mod, TWO_PARAMS, changers)
         transformation.prepare_for_execution()
         aggregated = [
             type(c) for c in transformation.applicability_preconditions()
         ]
-        per_step = [
+        per_changer = [
             type(c)
-            for step in steps
-            for c in step.applicability_preconditions()
+            for changer, info in zip(changers, transformation.definition_infos())
+            for c in changer.applicability_conditions(info)
         ]
-        self.assertEqual(per_step, aggregated)
+        self.assertEqual(per_changer, aggregated)
 
     def test_generate_changes_builds_an_ordinary_changeset(self):
         code = dedent("""\
@@ -195,7 +195,7 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         """)
         mod = self._write_module("mod1", code)
         transformation = self._transformation(
-            mod, code, [arch_cs.RemoveParameterStep(0)]
+            mod, code, [ArgumentRemover(0)]
         )
         changes = transformation.generate_changes()
         self.assertEqual("Changing signature of <a_func>", changes.description)
@@ -217,7 +217,7 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         """)
         mod = self._write_module("mod1", code)
         transformation = self._transformation(
-            mod, code, [arch_cs.RemoveParameterStep(0)]
+            mod, code, [ArgumentRemover(0)]
         )
         transformation.execute()
         self.project.history.undo()
@@ -230,7 +230,7 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         """)
         mod = self._write_module("mod1", code)
         transformation = self._transformation(
-            mod, code, [arch_cs.AddParameterStep(0, "p1")]
+            mod, code, [ArgumentAdder(0, "p1")]
         )
         with self.assertRaises(exceptions.RefactoringError):
             transformation.generate_changes()
@@ -260,8 +260,8 @@ class TwoLevelEquivalenceTest(ChangeSignatureArchMixin, unittest.TestCase):
         self._assert_same_changes(
             code,
             lambda: [
-                arch_cs.AddParameterStep(2, "p3", "None"),
-                arch_cs.ReorderParametersStep([1, 0, 2]),
+                ArgumentAdder(2, "p3", "None"),
+                ArgumentReorderer([1, 0, 2]),
             ],
         )
 
@@ -280,8 +280,8 @@ class TwoLevelEquivalenceTest(ChangeSignatureArchMixin, unittest.TestCase):
             mod,
             code,
             [
-                arch_cs.RemoveParameterStep(2),
-                arch_cs.AddParameterStep(2, "p3", None, "3"),
+                ArgumentRemover(2),
+                ArgumentAdder(2, "p3", None, "3"),
             ],
         )
         transformation_changes = transformation.generate_changes()
@@ -318,7 +318,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [arch_cs.RemoveParameterRefactoring(0)]
+            mod, code, [ArgumentRemover(0)]
         )
         refactoring.prepare_for_execution()
         conditions = [
@@ -341,7 +341,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [arch_cs.RemoveParameterRefactoring(0)]
+            mod, code, [ArgumentRemover(0)]
         )
         refactoring.prepare_for_execution()
         refactoring.check_breaking_change_preconditions()
@@ -355,7 +355,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [arch_cs.AddParameterRefactoring(0, "p1")]
+            mod, code, [ArgumentAdder(0, "p1")]
         )
         refactoring.prepare_for_execution()
         conditions = [
@@ -375,7 +375,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         """)
         mod = self._write_module("mod1", code)
         refactoring = self._refactoring(
-            mod, code, [arch_cs.AddParameterRefactoring(0, "p1", "None")]
+            mod, code, [ArgumentAdder(0, "p1", "None")]
         )
         refactoring.prepare_for_execution()
         refactoring.check_breaking_change_preconditions()
@@ -383,7 +383,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
     def test_hierarchy_override_left_behind_is_reported(self):
         mod = self._write_module("mod1", HIERARCHY)
         refactoring = self._refactoring(
-            mod, HIERARCHY, [arch_cs.RemoveParameterRefactoring(1)]
+            mod, HIERARCHY, [ArgumentRemover(1)]
         )
         refactoring.prepare_for_execution()
         condition = refactoring.hierarchy_overrides_condition()
@@ -397,7 +397,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         refactoring = self._refactoring(
             mod,
             HIERARCHY,
-            [arch_cs.RemoveParameterRefactoring(1)],
+            [ArgumentRemover(1)],
             in_hierarchy=True,
         )
         refactoring.prepare_for_execution()
@@ -407,7 +407,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
     def test_unsure_receiver_is_reported(self):
         mod = self._write_module("mod1", UNSURE_CALL)
         refactoring = self._refactoring(
-            mod, UNSURE_CALL, [arch_cs.RemoveParameterRefactoring(1)]
+            mod, UNSURE_CALL, [ArgumentRemover(1)]
         )
         refactoring.prepare_for_execution()
         condition = refactoring.unsure_occurrences_condition()
@@ -424,7 +424,7 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         refactoring = self._refactoring(
             mod1,
             code,
-            [arch_cs.RemoveParameterRefactoring(0)],
+            [ArgumentRemover(0)],
             resources=[mod1],
         )
         refactoring.prepare_for_execution()
@@ -443,7 +443,7 @@ class DriverPolicyTest(ChangeSignatureArchMixin, unittest.TestCase):
     def _driver(self, policy):
         mod = self._write_module("mod1", self.WARNING_CODE)
         refactoring = self._refactoring(
-            mod, self.WARNING_CODE, [arch_cs.RemoveParameterRefactoring(0)]
+            mod, self.WARNING_CODE, [ArgumentRemover(0)]
         )
         return arch.RefactoringDriver(refactoring, policy=policy)
 
@@ -501,16 +501,23 @@ class LegacyCompatibilityCharacterizationTest(
             mod.read(),
         )
 
-    def test_custom_changer_instances_are_passed_through(self):
+    def test_a_changer_subclass_inherits_its_conditions(self):
         class UpperCaseAdder(ArgumentAdder):
             pass
 
+        mod = self._write_module("mod1", TWO_PARAMS)
         changer = UpperCaseAdder(0, "p1")
-        steps = arch_cs.steps_for_changers([changer])
-        self.assertIsInstance(steps[0], arch_cs.AddParameterRefactoring)
-        self.assertIs(changer, steps[0].transformation.changer)
+        transformation = self._transformation(mod, TWO_PARAMS, [changer])
+        transformation.prepare_for_execution()
+        self.assertIs(changer, transformation.changers[0])
+        self.assertEqual(
+            [type(c) for c in ArgumentAdder(0, "p1").applicability_conditions(
+                transformation.definition_infos()[0]
+            )],
+            [type(c) for c in transformation.applicability_preconditions()],
+        )
 
-    def test_unknown_changer_gets_the_generic_step(self):
+    def test_a_changer_outside_the_hierarchy_contributes_no_conditions(self):
         class Custom:
             def change_definition_info(self, definition_info):
                 pass
@@ -518,10 +525,12 @@ class LegacyCompatibilityCharacterizationTest(
             def change_argument_mapping(self, definition_info, mapping):
                 pass
 
+        mod = self._write_module("mod1", TWO_PARAMS)
         changer = Custom()
-        steps = arch_cs.steps_for_changers([changer])
-        self.assertIsInstance(steps[0], arch_cs.GenericChangerStep)
-        self.assertIs(changer, steps[0].changer)
+        transformation = self._transformation(mod, TWO_PARAMS, [changer])
+        transformation.prepare_for_execution()
+        self.assertIs(changer, transformation.changers[0])
+        self.assertEqual([], transformation.applicability_preconditions())
 
 
 if __name__ == "__main__":

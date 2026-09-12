@@ -178,7 +178,7 @@ class ChangeSignature:
             self.project,
             self.resource,
             self.offset,
-            steps=change_signature_arch.steps_for_changers(changers),
+            changers=changers,
             in_hierarchy=in_hierarchy,
             resources=resources,
             task_handle=task_handle,
@@ -221,11 +221,28 @@ class _FunctionChangers:
 
 
 class _ArgumentChanger:
+    """An elementary signature edit.
+
+    Besides the two edit functions, a changer states the conditions
+    under which it can be applied (`applicability_conditions`) and the
+    behavior it can break when it is (`breaking_change_conditions`).
+    Both are evaluated against the signature the *preceding* changers
+    produce, which the composite supplies.
+    """
+
     def change_definition_info(self, definition_info):
         pass
 
     def change_argument_mapping(self, definition_info, argument_mapping):
         pass
+
+    def applicability_conditions(self, definition_info):
+        """Preconditions for constructing a structurally valid edit."""
+        return []
+
+    def breaking_change_conditions(self, composite, position):
+        """Preconditions for preserving behavior at the call sites."""
+        return []
 
 
 class ArgumentNormalizer(_ArgumentChanger):
@@ -261,6 +278,16 @@ class ArgumentRemover(_ArgumentChanger):
             if name in mapping.param_dict:
                 del mapping.param_dict[name]
 
+    def applicability_conditions(self, definition_info):
+        from rope.refactor import change_signature_arch as conditions
+
+        return [conditions.ParameterExistsCondition(definition_info, self.index)]
+
+    def breaking_change_conditions(self, composite, position):
+        from rope.refactor import change_signature_arch as conditions
+
+        return [conditions.NoArgumentValueLostCondition(composite, position)]
+
 
 class ArgumentAdder(_ArgumentChanger):
     def __init__(self, index, name, default=None, value=None):
@@ -281,6 +308,24 @@ class ArgumentAdder(_ArgumentChanger):
         if self.value is not None:
             mapping.param_dict[self.name] = self.value
 
+    def applicability_conditions(self, definition_info):
+        from rope.refactor import arch
+        from rope.refactor import change_signature_arch as conditions
+
+        return [
+            arch.ValidNameCondition(self.name),
+            conditions.NoDuplicateParameterCondition(definition_info, self.name),
+        ]
+
+    def breaking_change_conditions(self, composite, position):
+        from rope.refactor import change_signature_arch as conditions
+
+        return [
+            conditions.CallSitesReceiveRequiredArgumentCondition(
+                composite.analysis, self
+            )
+        ]
+
 
 class ArgumentDefaultInliner(_ArgumentChanger):
     def __init__(self, index):
@@ -299,6 +344,13 @@ class ArgumentDefaultInliner(_ArgumentChanger):
         name = definition_info.args_with_defaults[self.index][0]
         if default is not None and name not in mapping.param_dict:
             mapping.param_dict[name] = default
+
+    def applicability_conditions(self, definition_info):
+        from rope.refactor import change_signature_arch as conditions
+
+        return [
+            conditions.ParameterIndexInRangeCondition(definition_info, self.index)
+        ]
 
 
 class ArgumentReorderer(_ArgumentChanger):
@@ -334,6 +386,13 @@ class ArgumentReorderer(_ArgumentChanger):
             if seen_default and default is None and self.autodef is not None:
                 new_args[index] = (arg, self.autodef)
         definition_info.args_with_defaults = new_args
+
+    def applicability_conditions(self, definition_info):
+        from rope.refactor import change_signature_arch as conditions
+
+        return [
+            conditions.ReorderIndicesValidCondition(definition_info, self.new_order)
+        ]
 
 
 class _ChangeCallsInModule:

@@ -4,7 +4,7 @@ Builds a small synthetic project with a class hierarchy and call
 sites, then runs one composite signature change (add a parameter,
 reorder, remove one):
 
-1. showing the parameter flow between the composite's steps,
+1. showing the signature flow between the composite's changers,
 2. at the transformation level (behavior-agnostic),
 3. at the refactoring level (warns, non-resumably),
 4. under the three driver policies, and
@@ -21,6 +21,11 @@ from textwrap import dedent, indent
 from rope.base.project import Project
 from rope.refactor import arch
 from rope.refactor import change_signature_arch as arch_cs
+from rope.refactor.change_signature import (
+    ArgumentAdder,
+    ArgumentRemover,
+    ArgumentReorderer,
+)
 
 REPORTS = dedent('''\
     class Report:
@@ -41,14 +46,14 @@ CLIENTS = dedent('''\
 ''')
 
 
-def steps():
+def changers():
     # Removing index 3 is invalid against the original three-slot
-    # signature; it only becomes applicable after the add step -- the
-    # late-configuration point the composite exists for.
+    # signature; it only becomes applicable after the add changer --
+    # the late-configuration point the composite exists for.
     return [
-        arch_cs.AddParameterRefactoring(3, "header"),
-        arch_cs.ReorderParametersStep([0, 1, 3, 2]),
-        arch_cs.RemoveParameterRefactoring(3),
+        ArgumentAdder(3, "header"),
+        ArgumentReorderer([0, 1, 3, 2]),
+        ArgumentRemover(3),
     ]
 
 
@@ -78,17 +83,17 @@ def main():
     offset = REPORTS.index("render")
 
     def refactoring():
-        return arch_cs.ChangeSignatureRefactoring(project, reports, offset, steps())
+        return arch_cs.ChangeSignatureRefactoring(project, reports, offset, changers())
 
-    print("=== Signature flow between the ordered steps ===\n")
+    print("=== Signature flow between the ordered changers ===\n")
     transformation = arch_cs.ChangeSignatureTransformation(
-        project, reports, offset, steps()
+        project, reports, offset, changers()
     )
     transformation.prepare_for_execution()
     infos = transformation.definition_infos()
-    for position, step in enumerate(transformation.unwrapped_steps()):
+    for position, changer in enumerate(transformation.changers):
         print(
-            f"{type(step).__name__}:"
+            f"{type(changer).__name__}:"
             f" {infos[position].to_string()}"
             f" -> {infos[position + 1].to_string()}"
         )
