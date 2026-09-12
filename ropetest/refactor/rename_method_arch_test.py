@@ -456,6 +456,11 @@ class RenameMethodRefactoringTest(RenameMethodArchMixin, unittest.TestCase):
         names = {condition.name for condition in caught.exception.conditions}
         self.assertIn("no-unsure-occurrences", names)
 
+    def test_warning_is_a_channel_distinct_from_refactoring_error(self):
+        warning = arch.BehaviorPreservationWarning([])
+        self.assertIsInstance(warning, exceptions.RopeError)
+        self.assertNotIsInstance(warning, exceptions.RefactoringError)
+
     def test_transformation_level_sets_the_warning_aside(self):
         mod = self._write_module("mod1", DUCK_TYPED)
         transformation = arch.RenameMethodTransformation(

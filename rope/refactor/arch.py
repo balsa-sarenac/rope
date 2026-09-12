@@ -36,7 +36,7 @@ APPLICABILITY = "applicability"
 BEHAVIOR_PRESERVING = "behavior_preserving"
 
 
-class BehaviorPreservationWarning(exceptions.RefactoringError):
+class BehaviorPreservationWarning(exceptions.RopeError):
     """Signals failed behavior-preserving preconditions.
 
     The reference architecture reports these violations through a
@@ -44,13 +44,13 @@ class BehaviorPreservationWarning(exceptions.RefactoringError):
     callers that want to proceed anyway use a driver policy or the
     underlying transformation instead of resuming.
 
-    It derives from `RefactoringError` deliberately, so that a caller
-    written against rope's existing interface treats a warning as a
-    refusal rather than missing it.  The cost is that such a caller
-    cannot tell a warning from a hard rejection by type; a caller that
-    needs the distinction uses the driver, which reports the two
-    separately.  Separating the hierarchies would be the stricter
-    choice and would break that compatibility.
+    It is deliberately *not* a `RefactoringError`: an applicability
+    failure stops the operation, a behavior-preserving failure
+    delegates a decision, and a script tells the two apart by type --
+    the two catchable channels of the reference architecture.  No
+    legacy caller is affected, because rope's existing entry points run
+    the driver under the LEGACY policy, which never raises this.  Both
+    still share `RopeError` as their root.
     """
 
     def __init__(self, conditions):
