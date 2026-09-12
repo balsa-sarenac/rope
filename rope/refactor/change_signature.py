@@ -180,6 +180,22 @@ class ChangeSignature:
         should be searched for occurrences; if `None` all python files
         in the project are searched.
 
+        The changers run as a composite (`change_signature_arch`), each
+        against the signature its predecessors produced, under the
+        LEGACY warning policy.  Four inputs therefore behave differently
+        from the folded single pass this method used to run; the
+        deprecated `remove`, `add`, `reorder`, `inline_default` and
+        `normalize` still run that pass:
+
+        * removing a parameter and re-adding one at the same index no
+          longer leaves the removed parameter's argument in the calls;
+        * an object outside the `_ArgumentChanger` hierarchy is
+          refused with a `RefactoringError` instead of being accepted;
+        * removing a non-existent index raises a `RefactoringError`
+          instead of silently doing nothing;
+        * inlining the default of a non-existent index raises a
+          `RefactoringError` instead of an `IndexError`.
+
         """
         # imported here: change_signature_arch builds on this module
         from rope.refactor import arch, change_signature_arch
