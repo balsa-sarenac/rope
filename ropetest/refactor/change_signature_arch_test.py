@@ -73,7 +73,7 @@ class ChangerConditionTest(ChangeSignatureArchMixin, unittest.TestCase):
             self._check(changer, info)
         condition = _against(changer, info).applicability_preconditions()[0]
         self.assertFalse(condition.check())
-        self.assertEqual(2, condition.violators[0].subject)
+        self.assertEqual([2], condition.violators)
 
     def test_remove_of_star_args_slot_is_applicable(self):
         self._check(

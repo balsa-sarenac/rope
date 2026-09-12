@@ -177,6 +177,12 @@ class NoUnsureOccurrencesCondition(Condition):
     Violators are the unsure `Occurrence` objects recorded during the
     shared occurrence analysis; checking this condition triggers that
     analysis, so warnings are never cheaper than the search itself.
+
+    It states no `subjects`: rope reports unresolvable receivers
+    through a callback invoked only on failure, so the occurrences it
+    *could* resolve are never recorded.  Enumerating them would mean
+    retaining every occurrence of the name, which the analysis has no
+    other use for.
     """
 
     name = "no-unsure-occurrences"

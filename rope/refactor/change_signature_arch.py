@@ -47,14 +47,6 @@ from rope.refactor.change_signature import (
 )
 
 
-class SignatureViolation:
-    """A violator: a parameter slot that fails against the current signature."""
-
-    def __init__(self, subject, definition_info):
-        self.subject = subject
-        self.definition_info = definition_info
-
-
 class NoDuplicateParameterCondition(arch.Condition):
     """The added parameter name is not already in the signature.
 
@@ -70,12 +62,13 @@ class NoDuplicateParameterCondition(arch.Condition):
         self.definition_info = definition_info
         self.parameter_name = name
 
+    def subjects(self):
+        return [pair[0] for pair in self.definition_info.args_with_defaults]
+
     def _find_violators(self):
-        info = self.definition_info
-        for pair in info.args_with_defaults:
-            if pair[0] == self.parameter_name:
-                return [SignatureViolation(self.parameter_name, info)]
-        return []
+        return [
+            name for name in self.subjects() if name == self.parameter_name
+        ]
 
     def error_string(self):
         return "Adding duplicate parameter: <%s>." % self.parameter_name
@@ -98,25 +91,19 @@ class ParameterExistsCondition(arch.Condition):
         self.definition_info = definition_info
         self.index = index
 
-    def _find_violators(self):
+    def subjects(self):
+        """Exactly the slots `ArgumentRemover` edits."""
         info = self.definition_info
-        index = self.index
         named_count = len(info.args_with_defaults)
-        if 0 <= index < named_count:
-            return []
-        if index == named_count and info.args_arg is not None:
-            return []
-        if (
-            index == named_count
-            and info.args_arg is None
-            and info.keywords_arg is not None
-        ) or (
-            index == named_count + 1
-            and info.args_arg is not None
-            and info.keywords_arg is not None
-        ):
-            return []
-        return [SignatureViolation(index, info)]
+        slots = list(range(named_count))
+        if info.args_arg is not None:
+            slots.append(named_count)
+        if info.keywords_arg is not None:
+            slots.append(named_count + (1 if info.args_arg is not None else 0))
+        return slots
+
+    def _find_violators(self):
+        return [] if self.index in self.subjects() else [self.index]
 
     def error_string(self):
         info = self.definition_info
@@ -142,17 +129,17 @@ class ReorderIndicesValidCondition(arch.Condition):
         self.definition_info = definition_info
         self.new_order = new_order
 
+    def subjects(self):
+        return list(self.new_order)
+
     def _find_violators(self):
-        info = self.definition_info
-        named_count = len(info.args_with_defaults)
-        new_order = self.new_order
+        named_count = len(self.definition_info.args_with_defaults)
         violators = [
-            SignatureViolation(index, info)
-            for index in new_order
-            if not 0 <= index < named_count
+            index for index in self.new_order if not 0 <= index < named_count
         ]
-        if len(new_order) > named_count:
-            violators.append(SignatureViolation(new_order, info))
+        # an order longer than the signature names slots that cannot be
+        # reordered, whichever indices they carry
+        violators.extend(self.new_order[named_count:])
         return violators
 
     def error_string(self):
@@ -178,11 +165,11 @@ class ParameterIndexInRangeCondition(arch.Condition):
         self.definition_info = definition_info
         self.index = index
 
+    def subjects(self):
+        return list(range(len(self.definition_info.args_with_defaults)))
+
     def _find_violators(self):
-        info = self.definition_info
-        if 0 <= self.index < len(info.args_with_defaults):
-            return []
-        return [SignatureViolation(self.index, info)]
+        return [] if self.index in self.subjects() else [self.index]
 
     def error_string(self):
         info = self.definition_info
@@ -382,6 +369,9 @@ class NoArgumentValueLostCondition(arch.Condition):
         super().__init__()
         self.child = child
 
+    def subjects(self):
+        return list(self.child.call_records)
+
     def _find_violators(self):
         info = self.child.definition_info
         index = self.child.index
@@ -427,10 +417,13 @@ class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
         self.child = child
         self.changer = child
 
+    def subjects(self):
+        return list(self.child.call_records)
+
     def _find_violators(self):
         if self.changer.default is not None or self.changer.value is not None:
             return []
-        return list(self.child.call_records)
+        return self.subjects()
 
     def error_string(self):
         places = ", ".join(
@@ -453,6 +446,10 @@ class HierarchyOverridesUpdatedCondition(arch.Condition):
     for.  Held at the composite level: it is a property of the shared
     occurrence scope, not of any single step.  Checking runs an extra
     definitions pass over the analyzed resources.
+
+    It states no `subjects`: its range is every definition of the name
+    in the analyzed resources, which only a second pass without the
+    self-exclusion filter would enumerate.
     """
 
     name = "hierarchy-overrides-updated"

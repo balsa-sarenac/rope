@@ -92,6 +92,24 @@ class HierarchyDoesNotDefineNameCondition(Condition):
         self.old_pyname = old_pyname
         self.new_name = new_name
 
+    def subjects(self):
+        """The classes checked: the selected one and every edited one.
+
+        Unlike the other conditions, a violator here is richer than a
+        subject -- a `ConflictingDefinition` says *which* definition in
+        the class collides -- so this condition reports its range but
+        cannot be negated.
+        """
+        self.analysis.ensure_ran()
+        return [self.pyclass] + [
+            pyclass
+            for pyclass in (
+                _containing_class(occurrence.get_pyname())
+                for occurrence in self.analysis.defining_occurrences
+            )
+            if pyclass is not None
+        ]
+
     def _find_violators(self):
         self.analysis.ensure_ran()
         renamed_locations = {self.old_pyname.get_definition_location()}
