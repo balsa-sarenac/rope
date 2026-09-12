@@ -505,13 +505,11 @@ class ArgumentReorderer(_ArgumentChanger):
 
 
 class _ChangeCallsInModule:
-    def __init__(self, project, occurrence_finder, resource, call_changer,
-                 observer=None):
+    def __init__(self, project, occurrence_finder, resource, call_changer):
         self.project = project
         self.occurrence_finder = occurrence_finder
         self.resource = resource
         self.call_changer = call_changer
-        self.observer = observer
 
     def get_changed_module(self):
         word_finder = worder.Worder(self.source)
@@ -521,8 +519,6 @@ class _ChangeCallsInModule:
                 continue
             start, end = occurrence.get_primary_range()
             begin_parens, end_parens = word_finder.get_word_parens_range(end - 1)
-            if self.observer is not None:
-                self.observer(occurrence, self.source[start:end_parens])
             if occurrence.is_called():
                 primary, pyname = occurrence.get_primary_and_pyname()
                 changed_call = self.call_changer.change_call(

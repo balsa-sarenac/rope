@@ -540,9 +540,8 @@ class LegacyCompatibilityCharacterizationTest(
 
         mod = self._write_module("mod1", TWO_PARAMS)
         transformation = self._transformation(mod, TWO_PARAMS, [Custom()])
-        transformation.prepare_for_execution()
-        with self.assertRaises(AttributeError):
-            transformation.check_preconditions()
+        with self.assertRaisesRegex(exceptions.RefactoringError, "Custom"):
+            transformation.prepare_for_execution()
 
 
 if __name__ == "__main__":

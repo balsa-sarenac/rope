@@ -233,8 +233,25 @@ class ChangeSignatureTransformation(arch.Transformation):
             else self.project.get_python_files()
         )
         self.children = self.changers
+        self._reject_foreign_children()
         self._reject_non_functions()
         self._prepared = True
+
+    def _reject_foreign_children(self):
+        """Every child must be one of rope's argument changers.
+
+        `get_changes` documents `changers` as `_ArgumentChanger`s.  An
+        object outside that hierarchy provides the two edit functions
+        but cannot act as a child, which resolves its own target and
+        constructs its own changes; it is refused here, as a
+        preparation failure, rather than by an attribute error later.
+        """
+        for child in self.children:
+            if not isinstance(_transformation_of(child), arch.Transformation):
+                raise exceptions.RefactoringError(
+                    "Change signature children must be argument changers;"
+                    f" got {type(child).__name__}"
+                )
 
     def _reject_non_functions(self):
         """The target must be a function before any child runs.
@@ -574,25 +591,3 @@ class ChangeSignatureRefactoring(arch.Refactoring):
             self.transformation.project, self.transformation.resources
         )
 
-
-def _conditions(changer, hook_name, *args):
-    """The conditions a changer contributes through `hook_name`.
-
-    Rope's public API accepts any object providing the two edit
-    functions, not only `_ArgumentChanger` subclasses; a changer from
-    outside that hierarchy simply contributes no conditions, exactly
-    as on the legacy path.
-    """
-    hook = getattr(changer, hook_name, None)
-    return hook(*args) if hook is not None else []
-
-
-class _CallRecord:
-    """A violator: a call site matched by the shared occurrence pass."""
-
-    def __init__(self, resource, lineno, primary, pyname, code):
-        self.resource = resource
-        self.lineno = lineno
-        self.primary = primary
-        self.pyname = pyname
-        self.code = code

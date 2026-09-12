@@ -94,6 +94,11 @@ class ConditionTest(RenameMethodArchMixin, unittest.TestCase):
         self.assertFalse(negated.check())
         self.assertIn("mod1.py", [r.path for r in negated.violators])
 
+    def test_condition_without_subjects_cannot_be_negated(self):
+        condition = arch.NoUnsureOccurrencesCondition(analysis=None, name="x")
+        with self.assertRaisesRegex(TypeError, "no subjects"):
+            condition.not_()
+
     def test_condition_levels(self):
         self.assertEqual(
             arch.APPLICABILITY, arch.ValidNameCondition("x").level

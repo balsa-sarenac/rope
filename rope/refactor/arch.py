@@ -93,6 +93,10 @@ class Condition:
         raise NotImplementedError
 
     def not_(self):
+        if type(self).subjects is Condition.subjects:
+            raise TypeError(
+                f"<{self.name}> states no subjects and cannot be negated"
+            )
         return NegatedCondition(self)
 
 
@@ -532,12 +536,7 @@ class RefactoringDriver:
     def run(self):
         refactoring = self.refactoring
         refactoring.prepare_for_execution()
-        applicability = refactoring.applicability_preconditions()
-        failed = [condition for condition in applicability if not condition.check()]
-        if failed:
-            raise exceptions.RefactoringError(
-                "\n".join(condition.error_string() for condition in failed)
-            )
+        applicability = check_applicability_preconditions(refactoring)
         warnings = []
         if self.policy != LEGACY:
             warnings = [
