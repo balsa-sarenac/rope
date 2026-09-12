@@ -85,17 +85,16 @@ def main():
     def refactoring():
         return arch_cs.ChangeSignatureRefactoring(project, reports, offset, changers())
 
-    print("=== Signature flow between the ordered changers ===\n")
+    print("=== What each child sees when it runs ===\n")
     transformation = arch_cs.ChangeSignatureTransformation(
         project, reports, offset, changers()
     )
     transformation.prepare_for_execution()
-    infos = transformation.definition_infos()
-    for position, changer in enumerate(transformation.changers):
+    transformation.check_preconditions()
+    for child in transformation.children:
         print(
-            f"{type(changer).__name__}:"
-            f" {infos[position].to_string()}"
-            f" -> {infos[position + 1].to_string()}"
+            f"{type(child.changer).__name__}:"
+            f" {child.definition_info.to_string()}"
         )
     print()
 

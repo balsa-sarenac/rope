@@ -6,7 +6,7 @@ from rope.base.change import ChangeContents, ChangeSet
 from rope.refactor import functionutils, occurrences
 
 
-def _resolve_signature_target(project, resource, offset):
+def _resolve_signature_target(project, resource, offset, pending=None):
     """Resolve the selected offset to a signature-change target.
 
     Returns ``(name, primary, pyname, others)``.  A class selection is
@@ -14,9 +14,19 @@ def _resolve_signature_target(project, resource, offset):
     the ``(class_name, class_pyname)`` pair used to update
     ``ClassName(...)`` call sites.  Both the legacy path and the
     architecture path resolve through here, so they cannot drift.
+
+    With a `pending` view (`arch.PendingChanges`), the target is
+    resolved against the program including changes not yet applied,
+    which is what lets a composite's later children see the edits of
+    their predecessors.
     """
-    name = worder.get_name_at(resource, offset)
-    this_pymodule = project.get_pymodule(resource)
+    if pending is not None:
+        source = pending.source(resource)
+        name = worder.Worder(source).get_word_at(offset)
+        this_pymodule = pending.pymodule(resource)
+    else:
+        name = worder.get_name_at(resource, offset)
+        this_pymodule = project.get_pymodule(resource)
     primary, pyname = evaluate.eval_location2(this_pymodule, offset)
     if pyname is None:
         return name, primary, None, None
@@ -240,7 +250,7 @@ class _ArgumentChanger:
         """Preconditions for constructing a structurally valid edit."""
         return []
 
-    def breaking_change_conditions(self, composite, position):
+    def breaking_change_conditions(self, child):
         """Preconditions for preserving behavior at the call sites."""
         return []
 
@@ -283,10 +293,10 @@ class ArgumentRemover(_ArgumentChanger):
 
         return [conditions.ParameterExistsCondition(definition_info, self.index)]
 
-    def breaking_change_conditions(self, composite, position):
+    def breaking_change_conditions(self, child):
         from rope.refactor import change_signature_arch as conditions
 
-        return [conditions.NoArgumentValueLostCondition(composite, position)]
+        return [conditions.NoArgumentValueLostCondition(child)]
 
 
 class ArgumentAdder(_ArgumentChanger):
@@ -317,14 +327,10 @@ class ArgumentAdder(_ArgumentChanger):
             conditions.NoDuplicateParameterCondition(definition_info, self.name),
         ]
 
-    def breaking_change_conditions(self, composite, position):
+    def breaking_change_conditions(self, child):
         from rope.refactor import change_signature_arch as conditions
 
-        return [
-            conditions.CallSitesReceiveRequiredArgumentCondition(
-                composite.analysis, self
-            )
-        ]
+        return [conditions.CallSitesReceiveRequiredArgumentCondition(child)]
 
 
 class ArgumentDefaultInliner(_ArgumentChanger):

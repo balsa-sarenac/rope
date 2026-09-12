@@ -45,7 +45,7 @@ condition is always a real one.
 
 import copy
 
-from rope.base import exceptions, pyobjects, taskhandle
+from rope.base import codeanalyze, exceptions, pyobjects, taskhandle, worder
 from rope.base.change import ChangeContents, ChangeSet
 from rope.refactor import arch, functionutils, occurrences
 from rope.refactor import change_signature as legacy
@@ -203,13 +203,126 @@ class ParameterIndexInRangeCondition(arch.Condition):
         )
 
 
-class ChangeSignatureTransformation(arch.Transformation):
-    """Behavior-agnostic signature change over ordered parameter steps.
+class ParameterTransformation(arch.Transformation):
+    """One argument changer, executable on its own.
 
-    Applicability is derived from the steps' preconditions by
-    aggregation, never re-implemented here; the target being a
-    function is a hard `prepare_for_execution` failure, exactly as
-    method-ness is for the rename transformation.
+    A child of the composite, and a transformation in its own right:
+    it resolves its target, states its applicability, and constructs
+    its own `ChangeSet`.  It resolves and rewrites against the
+    composite's `PendingChanges` view, so it sees the edits of the
+    children that ran before it.
+    """
+
+    def __init__(self, project, resource, offset, changer, resources, in_hierarchy):
+        self.project = project
+        self.resource = resource
+        self.offset = offset
+        self.changer = changer
+        self.resources = resources
+        self.in_hierarchy = in_hierarchy
+        self.pending = None
+        self.changes = None
+        self.definition_info = None
+        self.call_records = []
+        self.unsure_occurrences = []
+
+    def prepare_for_execution(self):
+        (self.name, self.primary, self.pyname, self.others) = (
+            legacy._resolve_signature_target(
+                self.project, self.resource, self.offset, pending=self.pending
+            )
+        )
+        if (
+            self.pyname is None
+            or self.pyname.get_object() is None
+            or not isinstance(self.pyname.get_object(), pyobjects.PyFunction)
+        ):
+            raise exceptions.RefactoringError(
+                "Change method signature should be performed on functions"
+            )
+        self.pyfunction = self.pyname.get_object()
+        self.definition_info = functionutils.DefinitionInfo.read(self.pyfunction)
+
+    def is_method(self):
+        return isinstance(self.pyfunction.parent, pyobjects.PyClass)
+
+    def applicability_preconditions(self):
+        return _conditions(self.changer, "applicability_conditions", self.definition_info)
+
+    def breaking_change_preconditions(self):
+        return _conditions(self.changer, "breaking_change_conditions", self)
+
+    def _finder(self):
+        finder = occurrences.create_finder(
+            self.project,
+            self.name,
+            self.pyname,
+            instance=self.primary,
+            in_hierarchy=self.in_hierarchy and self.is_method(),
+            unsure=self._record_unsure,
+        )
+        if self.others:
+            name, pyname = self.others
+            constructor_finder = occurrences.create_finder(
+                self.project, name, pyname, only_calls=True
+            )
+            finder = legacy._MultipleFinders([finder, constructor_finder])
+        return finder
+
+    def _record_unsure(self, occurrence):
+        self.unsure_occurrences.append(occurrence)
+        return False
+
+    def private_transform(self):
+        finder = self._finder()
+        changers = legacy._FunctionChangers(
+            self.pyfunction, self.definition_info, [self.changer]
+        )
+        changes = ChangeSet("Changing signature of <%s>" % self.name)
+        for file_ in self.resources:
+            pymodule = self.pending.pymodule(file_)
+            new_content = self._rewrite(finder, pymodule, changers)
+            if new_content is not None and new_content != pymodule.source_code:
+                changes.add_change(ChangeContents(file_, new_content))
+        self.changes = changes
+        return changes
+
+    def _rewrite(self, finder, pymodule, changers):
+        """`_ChangeCallsInModule.get_changed_module`, over the pending view."""
+        source = pymodule.source_code
+        word_finder = worder.Worder(source)
+        collector = codeanalyze.ChangeCollector(source)
+        for occurrence in finder.find_occurrences(pymodule=pymodule):
+            if not occurrence.is_called() and not occurrence.is_defined():
+                continue
+            start, end = occurrence.get_primary_range()
+            begin_parens, end_parens = word_finder.get_word_parens_range(end - 1)
+            call = source[start:end_parens]
+            if occurrence.is_called():
+                primary, pyname = occurrence.get_primary_and_pyname()
+                self.call_records.append(
+                    _CallRecord(
+                        occurrence.resource, occurrence.lineno, primary, pyname, call
+                    )
+                )
+                changed = changers.change_call(primary, pyname, call)
+            else:
+                changed = changers.change_definition(call)
+            if changed is not None:
+                collector.add_change(start, end_parens, changed)
+        return collector.get_changed()
+
+
+class ChangeSignatureTransformation(arch.Transformation):
+    """A signature change as an ordered sequence of executable children.
+
+    Each child is a `ParameterTransformation` that runs against the
+    `PendingChanges` view the composite carries, so a child is checked
+    and rewritten against the program its predecessors produced --
+    not against the original.  Applicability is therefore checked *by*
+    the children at their own point in the sequence, never aggregated
+    up front against a program that no longer describes what the
+    child will meet.
     """
 
     def __init__(
@@ -230,92 +343,111 @@ class ChangeSignatureTransformation(arch.Transformation):
         self._given_resources = resources
         self.resources = None
         self.task_handle = task_handle
-        self.name = None
-        self.primary = None
-        self.pyname = None
-        self.others = None
-        self.pyfunction = None
-        self.definition_info = None
+        self.children = []
         self.changes = None
-        self.analysis = None
-        self._definition_info_fold = None
+        self._pending = None
         self._prepared = False
 
     def prepare_for_execution(self):
-        """Resolve the target and bind each step to its input signature.
-
-        Binding happens here -- not at construction -- because step
-        *i*'s preconditions are only meaningful against the signature
-        produced by steps *0..i-1*, which does not exist before the
-        composite resolves the target and projects the earlier steps.
-        """
         if self._prepared:
             return
-        (self.name, self.primary, self.pyname, self.others) = (
-            legacy._resolve_signature_target(self.project, self.resource, self.offset)
+        self.resources = (
+            self._given_resources
+            if self._given_resources is not None
+            else self.project.get_python_files()
+        )
+        self.children = [
+            ParameterTransformation(
+                self.project,
+                self.resource,
+                self.offset,
+                changer,
+                self.resources,
+                self.in_hierarchy,
+            )
+            for changer in self.changers
+        ]
+        self._reject_non_functions()
+        self._prepared = True
+
+    def _reject_non_functions(self):
+        """The target must be a function before any child runs.
+
+        The composite's only hard applicability check, exactly as
+        method-ness is for the rename transformation.  Everything else
+        is checked by the children, each against the program its
+        predecessors produced.
+        """
+        _, _, pyname, _ = legacy._resolve_signature_target(
+            self.project, self.resource, self.offset
         )
         if (
-            self.pyname is None
-            or self.pyname.get_object() is None
-            or not isinstance(self.pyname.get_object(), pyobjects.PyFunction)
+            pyname is None
+            or pyname.get_object() is None
+            or not isinstance(pyname.get_object(), pyobjects.PyFunction)
         ):
             raise exceptions.RefactoringError(
                 "Change method signature should be performed on functions"
             )
-        self.pyfunction = self.pyname.get_object()
-        self.definition_info = functionutils.DefinitionInfo.read(self.pyfunction)
-        if self._given_resources is None:
-            self.resources = self.project.get_python_files()
-        else:
-            self.resources = self._given_resources
-        self.analysis = _SignatureAnalysis(self)
-        self._prepared = True
 
-    def definition_infos(self):
-        """The signature each step sees: one fold, computed once.
+    def run(self):
+        """Execute the children into a pending view, once."""
+        if self._pending is None:
+            pending = arch.PendingChanges(self.project)
+            try:
+                for child in self.children:
+                    child.pending = pending
+                    child.prepare_for_execution()
+                    child.check_preconditions()
+                    pending.absorb(child.private_transform())
+            finally:
+                pending.restore()
+            self._pending = pending
+        return self._pending
 
-        Entry *i* is the signature produced by steps ``0..i-1``.  This
-        is the only projection in the module; every step condition
-        reads its input from here, so a condition can never disagree
-        with the signature the composite believes in.
+    def _target(self):
+        """Resolve the target against the program as it stands.
 
-        A changer that cannot be applied to its input -- the legacy
-        duplicate-add validation, the raw `IndexError` of an
-        out-of-range reorder or inline -- contributes its input
-        unchanged, and its own reified condition reports the failure
-        at check time.
+        Composite-level conditions are properties of the *original*
+        program, so the composite resolves its own target rather than
+        borrowing a child's: a child's pyname belongs to a module the
+        pending view has since discarded.
         """
-        if self._definition_info_fold is None:
-            infos = [self.definition_info]
-            for changer in self.changers:
-                projected = copy.deepcopy(infos[-1])
-                try:
-                    changer.change_definition_info(projected)
-                except (exceptions.RefactoringError, IndexError):
-                    projected = infos[-1]
-                infos.append(projected)
-            self._definition_info_fold = infos
-        return self._definition_info_fold
+        return legacy._resolve_signature_target(
+            self.project, self.resource, self.offset
+        )
+
+    @property
+    def name(self):
+        return self._target()[0]
+
+    @property
+    def pyname(self):
+        return self._target()[2]
+
+    @property
+    def definition_info(self):
+        return functionutils.DefinitionInfo.read(self.pyname.get_object())
 
     def is_method(self):
-        return isinstance(self.pyfunction.parent, pyobjects.PyClass)
+        return isinstance(self.pyname.get_object().parent, pyobjects.PyClass)
+
+    def unsure_occurrences(self):
+        self.run()
+        return [o for child in self.children for o in child.unsure_occurrences]
 
     def applicability_preconditions(self):
-        """Each changer states its own; the composite concatenates."""
-        return [
-            condition
-            for changer, info in zip(self.changers, self.definition_infos())
-            for condition in _conditions(changer, "applicability_conditions", info)
-        ]
+        """None: each child states and checks its own."""
+        return []
+
+    def check_preconditions(self):
+        self.run()
 
     def private_transform(self):
-        """Construct the `ChangeSet` from the shared signature analysis."""
-        self.analysis.ensure_ran()
-        changes = ChangeSet("Changing signature of <%s>" % self.name)
-        for file_, new_content in self.analysis.new_contents:
-            changes.add_change(ChangeContents(file_, new_content))
-        self.changes = changes
-        return changes
+        self.changes = self.run().as_changes(
+            "Changing signature of <%s>" % self.name
+        )
+        return self.changes
 
 
 class NoArgumentValueLostCondition(arch.Condition):
@@ -331,35 +463,22 @@ class NoArgumentValueLostCondition(arch.Condition):
     name = "no-argument-value-lost"
     level = arch.BEHAVIOR_PRESERVING
 
-    def __init__(self, composite, position):
-        """Takes the composite and this changer's position in it: the
-        replay needs every preceding changer and the signature it saw,
-        so no narrower subject would be honest."""
+    def __init__(self, child):
         super().__init__()
-        self.composite = composite
-        self.position = position
+        self.child = child
 
     def _find_violators(self):
-        composite = self.composite
-        analysis = composite.analysis
-        analysis.ensure_ran()
-        infos = composite.definition_infos()
-        info = infos[self.position]
-        index = composite.changers[self.position].index
+        info = self.child.definition_info
+        index = self.child.changer.index
         if not 0 <= index < len(info.args_with_defaults):
             return []
         removed_name = info.args_with_defaults[index][0]
-        preceding = composite.changers[:self.position]
         violators = []
-        for record in analysis.call_records:
+        for record in self.child.call_records:
             call_info = functionutils.CallInfo.read(
-                record.primary, record.pyname, composite.definition_info, record.code
+                record.primary, record.pyname, info, record.code
             )
-            mapping = functionutils.ArgumentMapping(
-                composite.definition_info, call_info
-            )
-            for definition_info, preceding_changer in zip(infos, preceding):
-                preceding_changer.change_argument_mapping(definition_info, mapping)
+            mapping = functionutils.ArgumentMapping(info, call_info)
             if removed_name in mapping.param_dict:
                 violators.append(record)
         return violators
@@ -368,9 +487,8 @@ class NoArgumentValueLostCondition(arch.Condition):
         places = ", ".join(
             f"{record.resource.path}:{record.lineno}" for record in self.violators
         )
-        composite = self.composite
-        info = composite.definition_infos()[self.position]
-        name = info.args_with_defaults[composite.changers[self.position].index][0]
+        info = self.child.definition_info
+        name = info.args_with_defaults[self.child.changer.index][0]
         return (
             f"Removing parameter <{name}> drops an explicitly passed"
             f" argument at: {places}"
@@ -389,16 +507,15 @@ class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
     name = "call-sites-receive-required-argument"
     level = arch.BEHAVIOR_PRESERVING
 
-    def __init__(self, analysis, changer):
+    def __init__(self, child):
         super().__init__()
-        self.analysis = analysis
-        self.changer = changer
+        self.child = child
+        self.changer = child.changer
 
     def _find_violators(self):
         if self.changer.default is not None or self.changer.value is not None:
             return []
-        self.analysis.ensure_ran()
-        return list(self.analysis.call_records)
+        return list(self.child.call_records)
 
     def error_string(self):
         places = ", ".join(
@@ -483,28 +600,24 @@ class ChangeSignatureRefactoring(arch.Refactoring):
     Decorates the composite transformation.  The behavior-preserving
     commitment is assembled from two sources, as the reference
     architecture prescribes: conditions held at the composite level
-    (properties of the shared occurrence scope and analysis) and
-    conditions contributed by whichever steps are refactorings.
+    (properties of the shared occurrence scope) and conditions each
+    child contributes about its own edit.
     """
 
     def __init__(self, *args, **kwds):
         super().__init__(ChangeSignatureTransformation(*args, **kwds))
 
     def _build_breaking_change_preconditions(self):
+        # the children must have run: each contributes conditions about
+        # the call sites its own rewrite met
+        self.transformation.run()
         conditions = [
             self.hierarchy_overrides_condition(),
             self.unsure_occurrences_condition(),
             self.analysis_coverage_condition(),
         ]
-        for position, changer in enumerate(self.transformation.changers):
-            conditions.extend(
-                _conditions(
-                    changer,
-                    "breaking_change_conditions",
-                    self.transformation,
-                    position,
-                )
-            )
+        for child in self.transformation.children:
+            conditions.extend(child.breaking_change_preconditions())
         return conditions
 
     def hierarchy_overrides_condition(self):
@@ -512,7 +625,7 @@ class ChangeSignatureRefactoring(arch.Refactoring):
 
     def unsure_occurrences_condition(self):
         return arch.NoUnsureOccurrencesCondition(
-            self.transformation.analysis, self.transformation.name
+            self.transformation, self.transformation.name
         )
 
     def analysis_coverage_condition(self):
@@ -542,59 +655,3 @@ class _CallRecord:
         self.primary = primary
         self.pyname = pyname
         self.code = code
-
-
-class _SignatureAnalysis(arch.OccurrenceAnalysis):
-    """The change-signature pass, recording unsure and matched calls.
-
-    Reproduces the legacy `ChangeSignature._change_calls` pass exactly
-    -- the same finder configuration, the same `_FunctionChangers`
-    edit chain, the same `_ChangeCallsInModule` rewriting -- so the
-    composite's output is byte-identical to the legacy path.
-    """
-
-    def __init__(self, transformation):
-        super().__init__(transformation)
-        self.call_records = []
-        self.function_changers = None
-
-    def _build_finder(self):
-        transformation = self.transformation
-        finder = occurrences.create_finder(
-            transformation.project,
-            transformation.name,
-            transformation.pyname,
-            instance=transformation.primary,
-            in_hierarchy=transformation.in_hierarchy and transformation.is_method(),
-            unsure=self.record_unsure,
-        )
-        if transformation.others:
-            name, pyname = transformation.others
-            constructor_finder = occurrences.create_finder(
-                transformation.project, name, pyname, only_calls=True
-            )
-            finder = legacy._MultipleFinders([finder, constructor_finder])
-        self.function_changers = legacy._FunctionChangers(
-            transformation.pyfunction,
-            transformation.definition_info,
-            transformation.changers,
-        )
-        return finder
-
-    def _rewrite(self, finder, resource):
-        change_calls = legacy._ChangeCallsInModule(
-            self.transformation.project,
-            finder,
-            resource,
-            self.function_changers,
-            observer=self._record,
-        )
-        return change_calls.get_changed_module()
-
-    def _record(self, occurrence, code):
-        if not occurrence.is_called():
-            return
-        primary, pyname = occurrence.get_primary_and_pyname()
-        self.call_records.append(
-            _CallRecord(occurrence.resource, occurrence.lineno, primary, pyname, code)
-        )

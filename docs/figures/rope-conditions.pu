@@ -32,23 +32,25 @@ class _ArgumentChanger {
     breaking_change_conditions()
 }
 
-class ChangeSignatureTransformation {
-    changers
-    definition_infos()
+class ParameterTransformation {
+    changer
+    definition_info
+    prepare_for_execution()
     applicability_preconditions()
+    private_transform()
 }
 
-class ChangeSignatureRefactoring {
-    breaking_change_preconditions()
+class ChangeSignatureTransformation {
+    children
+    run()
 }
 
 Condition <|-- NegatedCondition
 NegatedCondition --> Condition
 
 _ArgumentChanger --> Condition
-
-ChangeSignatureTransformation o-- "ordered" _ArgumentChanger
-ChangeSignatureTransformation --> Condition : aggregates
-ChangeSignatureRefactoring --> Condition : composite-level
+ParameterTransformation --> _ArgumentChanger : changer
+ParameterTransformation --> Condition : its own
+ChangeSignatureTransformation o-- "ordered" ParameterTransformation
 
 @enduml

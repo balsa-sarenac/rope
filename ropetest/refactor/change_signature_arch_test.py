@@ -144,7 +144,7 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         with self.assertRaises(exceptions.RefactoringError):
             transformation.prepare_for_execution()
 
-    def test_each_changer_is_checked_against_its_predecessors_output(self):
+    def test_each_child_sees_its_predecessors_edits(self):
         mod = self._write_module("mod1", TWO_PARAMS)
         changers = [
             ArgumentAdder(2, "p3"),
@@ -157,7 +157,8 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
             ["p1", "p2", "p3"],
             [
                 pair[0]
-                for pair in transformation.definition_infos()[1].args_with_defaults
+                for pair in transformation.children[1]
+                .definition_info.args_with_defaults
             ],
         )
 
@@ -169,7 +170,7 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         with self.assertRaises(exceptions.RefactoringError):
             transformation.check_preconditions()
 
-    def test_applicability_is_aggregated_from_the_changers(self):
+    def test_each_child_states_its_own_applicability(self):
         mod = self._write_module("mod1", TWO_PARAMS)
         changers = [
             ArgumentAdder(2, "p3"),
@@ -177,15 +178,17 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         ]
         transformation = self._transformation(mod, TWO_PARAMS, changers)
         transformation.prepare_for_execution()
-        aggregated = [
-            type(c) for c in transformation.applicability_preconditions()
-        ]
-        per_changer = [
-            type(c)
-            for changer, info in zip(changers, transformation.definition_infos())
-            for c in changer.applicability_conditions(info)
-        ]
-        self.assertEqual(per_changer, aggregated)
+        # the composite holds none of its own; each child checks at its
+        # own point in the sequence, against what its predecessors left
+        self.assertEqual([], transformation.applicability_preconditions())
+        transformation.check_preconditions()
+        self.assertEqual(
+            [type(c) for c in changers[1].applicability_conditions(
+                transformation.children[1].definition_info
+            )],
+            [type(c) for c in transformation.children[1]
+             .applicability_preconditions()],
+        )
 
     def test_generate_changes_builds_an_ordinary_changeset(self):
         code = dedent("""\
@@ -471,15 +474,17 @@ class DriverPolicyTest(ChangeSignatureArchMixin, unittest.TestCase):
 class LegacyCompatibilityCharacterizationTest(
     ChangeSignatureArchMixin, unittest.TestCase
 ):
-    def test_remove_then_re_add_keeps_the_stale_argument(self):
-        """Pins the legacy ArgumentRemover mapping bug.
+    def test_remove_then_re_add_drops_the_stale_argument(self):
+        """Executing the children in sequence fixes a legacy defect.
 
         `ArgumentRemover.change_argument_mapping` looks up
         ``args_with_defaults[0]`` (a tuple) instead of the removed
-        parameter's name, so the supplied value is never purged from
-        the mapping.  Removing `p1` and re-adding it therefore keeps
-        the old call argument.  Preserved for characterization
-        fidelity; making parameter flow explicit is what surfaced it.
+        parameter's name, so the supplied value was never purged from
+        the mapping.  Folding both changers into one pass therefore
+        left the old call argument in place.  Each child now rewrites
+        the program its predecessor produced, so the removal really
+        happens before the addition is analyzed and the stale argument
+        cannot survive.
         """
         code = dedent("""\
             def a_func(p1):
@@ -496,7 +501,7 @@ class LegacyCompatibilityCharacterizationTest(
             dedent("""\
                 def a_func(p1):
                     pass
-                a_func(1)
+                a_func()
             """),
             mod.read(),
         )
@@ -506,15 +511,17 @@ class LegacyCompatibilityCharacterizationTest(
             pass
 
         mod = self._write_module("mod1", TWO_PARAMS)
-        changer = UpperCaseAdder(0, "p1")
+        changer = UpperCaseAdder(0, "p3")
         transformation = self._transformation(mod, TWO_PARAMS, [changer])
         transformation.prepare_for_execution()
-        self.assertIs(changer, transformation.changers[0])
+        transformation.check_preconditions()
+        child = transformation.children[0]
+        self.assertIs(changer, child.changer)
         self.assertEqual(
-            [type(c) for c in ArgumentAdder(0, "p1").applicability_conditions(
-                transformation.definition_infos()[0]
+            [type(c) for c in ArgumentAdder(0, "p3").applicability_conditions(
+                child.definition_info
             )],
-            [type(c) for c in transformation.applicability_preconditions()],
+            [type(c) for c in child.applicability_preconditions()],
         )
 
     def test_a_changer_outside_the_hierarchy_contributes_no_conditions(self):

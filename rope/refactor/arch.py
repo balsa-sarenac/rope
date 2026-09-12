@@ -180,8 +180,11 @@ class NoUnsureOccurrencesCondition(Condition):
         self.searched_name = name
 
     def _find_violators(self):
-        self.analysis.ensure_ran()
-        return self.analysis.unsure_occurrences
+        analysis = self.analysis
+        if hasattr(analysis, "ensure_ran"):
+            analysis.ensure_ran()
+            return analysis.unsure_occurrences
+        return analysis.unsure_occurrences()
 
     def error_string(self):
         places = ", ".join(
@@ -317,6 +320,69 @@ class Refactoring(Transformation):
         ]
         if failed:
             raise BehaviorPreservationWarning(failed)
+
+
+class PendingChanges:
+    """The program as it would be after the changes absorbed so far.
+
+    A composite's children each construct changes; a later child must
+    analyze the program *including* its predecessors' edits, without
+    anything being written.  This is the view that makes that
+    possible -- the role `RBNamespace` plays in the reference
+    architecture.
+
+    Rope keeps parsed modules in `pycore.module_cache.module_map`,
+    keyed by resource, and every name resolution goes through it.  A
+    pending module is therefore installed into that cache rather than
+    consulted beside it: a module built from pending source would
+    otherwise be a different object than the one other modules resolve
+    through, and cross-module occurrences would stop matching.
+
+    `restore()` drops the pending modules again, and must run whether
+    or not the children succeed.
+    """
+
+    def __init__(self, project):
+        self.project = project
+        self.sources = {}
+
+    def absorb(self, changes):
+        """Take the changes into the view without writing anything."""
+        for change in changes.changes:
+            self.sources[change.resource] = change.new_contents
+            self._install(change.resource)
+
+    def _install(self, resource):
+        from rope.base import libutils
+
+        pycore = self.project.pycore
+        pycore._invalidate_resource_cache(resource)
+        module = libutils.get_string_module(
+            self.project, self.sources[resource], resource
+        )
+        pycore.module_cache.module_map[resource] = module
+
+    def restore(self):
+        """Forget the pending modules; the project is untouched."""
+        pycore = self.project.pycore
+        for resource in self.sources:
+            pycore._invalidate_resource_cache(resource)
+
+    def source(self, resource):
+        if resource in self.sources:
+            return self.sources[resource]
+        return resource.read()
+
+    def pymodule(self, resource):
+        return self.project.get_pymodule(resource)
+
+    def as_changes(self, description):
+        from rope.base.change import ChangeContents, ChangeSet
+
+        changes = ChangeSet(description)
+        for resource, source in self.sources.items():
+            changes.add_change(ChangeContents(resource, source))
+        return changes
 
 
 class OccurrenceAnalysis:
