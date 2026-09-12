@@ -157,7 +157,7 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
             ["p1", "p2", "p3"],
             [
                 pair[0]
-                for pair in transformation.children[1]
+                for pair in transformation.child_transformations()[1]
                 .definition_info.args_with_defaults
             ],
         )
@@ -184,9 +184,9 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
         transformation.check_preconditions()
         self.assertEqual(
             [type(c) for c in changers[1].applicability_conditions(
-                transformation.children[1].definition_info
+                transformation.child_transformations()[1].definition_info
             )],
-            [type(c) for c in transformation.children[1]
+            [type(c) for c in transformation.child_transformations()[1]
              .applicability_preconditions()],
         )
 
@@ -515,7 +515,7 @@ class LegacyCompatibilityCharacterizationTest(
         transformation = self._transformation(mod, TWO_PARAMS, [changer])
         transformation.prepare_for_execution()
         transformation.check_preconditions()
-        child = transformation.children[0]
+        child = transformation.child_transformations()[0]
         self.assertIs(changer, child.changer)
         self.assertEqual(
             [type(c) for c in ArgumentAdder(0, "p3").applicability_conditions(

@@ -249,9 +249,6 @@ class ParameterTransformation(arch.Transformation):
     def applicability_preconditions(self):
         return _conditions(self.changer, "applicability_conditions", self.definition_info)
 
-    def breaking_change_preconditions(self):
-        return _conditions(self.changer, "breaking_change_conditions", self)
-
     def _finder(self):
         finder = occurrences.create_finder(
             self.project,
@@ -356,19 +353,35 @@ class ChangeSignatureTransformation(arch.Transformation):
             if self._given_resources is not None
             else self.project.get_python_files()
         )
-        self.children = [
-            ParameterTransformation(
-                self.project,
-                self.resource,
-                self.offset,
-                changer,
-                self.resources,
-                self.in_hierarchy,
-            )
-            for changer in self.changers
-        ]
+        self.children = [self._child_for(changer) for changer in self.changers]
         self._reject_non_functions()
         self._prepared = True
+
+    def _child_for(self, changer):
+        """A child at the level its edit warrants.
+
+        A changer whose edit can break behavior gets a child at the
+        refactoring level, which carries that commitment; the rest are
+        plain transformations.  The composite runs every child at its
+        transformation level and hoists the refactoring-level children's
+        commitments to its own decorator, so the caller's policy -- not
+        the composite -- decides what a warning means.
+        """
+        transformation = ParameterTransformation(
+            self.project,
+            self.resource,
+            self.offset,
+            changer,
+            self.resources,
+            self.in_hierarchy,
+        )
+        flavor = _REFACTORING_FLAVORS.get(type(changer))
+        if flavor is None:
+            for changer_class, candidate in _REFACTORING_FLAVORS.items():
+                if isinstance(changer, changer_class):
+                    flavor = candidate
+                    break
+        return flavor(transformation) if flavor else transformation
 
     def _reject_non_functions(self):
         """The target must be a function before any child runs.
@@ -396,10 +409,11 @@ class ChangeSignatureTransformation(arch.Transformation):
             pending = arch.PendingChanges(self.project)
             try:
                 for child in self.children:
-                    child.pending = pending
-                    child.prepare_for_execution()
-                    child.check_preconditions()
-                    pending.absorb(child.private_transform())
+                    inner = _transformation_of(child)
+                    inner.pending = pending
+                    inner.prepare_for_execution()
+                    inner.check_preconditions()
+                    pending.absorb(inner.private_transform())
             finally:
                 pending.restore()
             self._pending = pending
@@ -432,9 +446,22 @@ class ChangeSignatureTransformation(arch.Transformation):
     def is_method(self):
         return isinstance(self.pyname.get_object().parent, pyobjects.PyClass)
 
+    def child_transformations(self):
+        """The children at their transformation level.
+
+        A child may be a refactoring decorating one; the composite
+        constructs changes at the transformation level and leaves the
+        commitments to its own decorator.
+        """
+        return [_transformation_of(child) for child in self.children]
+
     def unsure_occurrences(self):
         self.run()
-        return [o for child in self.children for o in child.unsure_occurrences]
+        return [
+            occurrence
+            for child in self.child_transformations()
+            for occurrence in child.unsure_occurrences
+        ]
 
     def applicability_preconditions(self):
         """None: each child states and checks its own."""
@@ -594,6 +621,35 @@ class HierarchyOverridesUpdatedCondition(arch.Condition):
         )
 
 
+class RemoveParameterRefactoring(arch.Refactoring):
+    """Behavior-preserving parameter removal.
+
+    Decorates a `ParameterTransformation`, which constructs its own
+    changes; only the commitment is added here.
+    """
+
+    def _build_breaking_change_preconditions(self):
+        return [NoArgumentValueLostCondition(self.transformation)]
+
+
+class AddParameterRefactoring(arch.Refactoring):
+    """Behavior-preserving parameter addition."""
+
+    def _build_breaking_change_preconditions(self):
+        return [CallSitesReceiveRequiredArgumentCondition(self.transformation)]
+
+
+_REFACTORING_FLAVORS = {
+    ArgumentRemover: RemoveParameterRefactoring,
+    ArgumentAdder: AddParameterRefactoring,
+}
+
+
+def _transformation_of(child):
+    """The transformation level of a child that may be a refactoring."""
+    return getattr(child, "transformation", child)
+
+
 class ChangeSignatureRefactoring(arch.Refactoring):
     """Behavior-preserving signature change.
 
@@ -617,7 +673,8 @@ class ChangeSignatureRefactoring(arch.Refactoring):
             self.analysis_coverage_condition(),
         ]
         for child in self.transformation.children:
-            conditions.extend(child.breaking_change_preconditions())
+            if isinstance(child, arch.Refactoring):
+                conditions.extend(child.breaking_change_preconditions())
         return conditions
 
     def hierarchy_overrides_condition(self):

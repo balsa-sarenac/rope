@@ -234,10 +234,10 @@ class _ArgumentChanger:
     """An elementary signature edit.
 
     Besides the two edit functions, a changer states the conditions
-    under which it can be applied (`applicability_conditions`) and the
-    behavior it can break when it is (`breaking_change_conditions`).
-    Both are evaluated against the signature the *preceding* changers
-    produce, which the composite supplies.
+    under which it can be applied (`applicability_conditions`),
+    evaluated against the signature the *preceding* changers produce.
+    What such an edit can break is a commitment of the refactoring
+    that wraps it, not of the edit itself.
     """
 
     def change_definition_info(self, definition_info):
@@ -248,10 +248,6 @@ class _ArgumentChanger:
 
     def applicability_conditions(self, definition_info):
         """Preconditions for constructing a structurally valid edit."""
-        return []
-
-    def breaking_change_conditions(self, child):
-        """Preconditions for preserving behavior at the call sites."""
         return []
 
 
@@ -293,11 +289,6 @@ class ArgumentRemover(_ArgumentChanger):
 
         return [conditions.ParameterExistsCondition(definition_info, self.index)]
 
-    def breaking_change_conditions(self, child):
-        from rope.refactor import change_signature_arch as conditions
-
-        return [conditions.NoArgumentValueLostCondition(child)]
-
 
 class ArgumentAdder(_ArgumentChanger):
     def __init__(self, index, name, default=None, value=None):
@@ -326,11 +317,6 @@ class ArgumentAdder(_ArgumentChanger):
             arch.ValidNameCondition(self.name),
             conditions.NoDuplicateParameterCondition(definition_info, self.name),
         ]
-
-    def breaking_change_conditions(self, child):
-        from rope.refactor import change_signature_arch as conditions
-
-        return [conditions.CallSitesReceiveRequiredArgumentCondition(child)]
 
 
 class ArgumentDefaultInliner(_ArgumentChanger):

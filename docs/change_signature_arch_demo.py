@@ -85,16 +85,19 @@ def main():
     def refactoring():
         return arch_cs.ChangeSignatureRefactoring(project, reports, offset, changers())
 
-    print("=== What each child sees when it runs ===\n")
+    print("=== The composite's children, at the level each warrants ===\n")
     transformation = arch_cs.ChangeSignatureTransformation(
         project, reports, offset, changers()
     )
     transformation.prepare_for_execution()
     transformation.check_preconditions()
-    for child in transformation.children:
+    for child, inner in zip(
+        transformation.children, transformation.child_transformations()
+    ):
         print(
-            f"{type(child.changer).__name__}:"
-            f" {child.definition_info.to_string()}"
+            f"{type(inner.changer).__name__}"
+            f" [{type(child).__name__}]:"
+            f" {inner.definition_info.to_string()}"
         )
     print()
 
