@@ -65,9 +65,7 @@ class NoDuplicateParameterCondition(arch.Condition):
         return [pair[0] for pair in self.definition_info.args_with_defaults]
 
     def _find_violators(self):
-        return [
-            name for name in self.subjects() if name == self.parameter_name
-        ]
+        return [name for name in self.subjects() if name == self.parameter_name]
 
     def error_string(self):
         return "Adding duplicate parameter: <%s>." % self.parameter_name
@@ -135,9 +133,7 @@ class ReorderIndicesValidCondition(arch.Condition):
 
     def _find_violators(self):
         named_count = len(self.definition_info.args_with_defaults)
-        violators = [
-            index for index in self.new_order if not 0 <= index < named_count
-        ]
+        violators = [index for index in self.new_order if not 0 <= index < named_count]
         # an order longer than the signature names slots that cannot be
         # reordered, whichever indices they carry
         violators.extend(self.new_order[named_count:])
@@ -364,9 +360,7 @@ class ChangeSignatureTransformation(arch.Transformation):
         self.run()
 
     def private_transform(self):
-        self.changes = self.run().as_changes(
-            "Changing signature of <%s>" % self.name
-        )
+        self.changes = self.run().as_changes("Changing signature of <%s>" % self.name)
         return self.changes
 
 
@@ -673,4 +667,3 @@ class ChangeSignatureRefactoring(arch.Refactoring):
         return arch.AnalysisCoversAllClientsCondition(
             self.transformation.project, self.transformation.resources
         )
-

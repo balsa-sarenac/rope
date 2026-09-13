@@ -65,8 +65,8 @@ class ChangeSignature:
             )
 
     def _set_name_and_pyname(self):
-        (self.name, self.primary, self.pyname, self.others) = (
-            _resolve_signature_target(self.project, self.resource, self.offset)
+        self.name, self.primary, self.pyname, self.others = _resolve_signature_target(
+            self.project, self.resource, self.offset
         )
 
     def _change_calls(
@@ -313,9 +313,7 @@ class _ArgumentChanger(arch.Transformation):
 
     def private_transform(self):
         finder = self._finder()
-        changers = _FunctionChangers(
-            self.pyfunction, self.definition_info, [self]
-        )
+        changers = _FunctionChangers(self.pyfunction, self.definition_info, [self])
         changes = ChangeSet("Changing signature of <%s>" % self.target_name)
         for file_ in self.resources:
             pymodule = self.pending.pymodule(file_)
@@ -420,9 +418,7 @@ class ArgumentRemover(_ArgumentChanger):
     def applicability_preconditions(self):
         from rope.refactor import change_signature_arch as conditions
 
-        return [
-            conditions.ParameterExistsCondition(self.definition_info, self.index)
-        ]
+        return [conditions.ParameterExistsCondition(self.definition_info, self.index)]
 
 
 class ArgumentAdder(_ArgumentChanger):
@@ -449,9 +445,7 @@ class ArgumentAdder(_ArgumentChanger):
 
         return [
             arch.ValidNameCondition(self.name),
-            conditions.NoDuplicateParameterCondition(
-                self.definition_info, self.name
-            ),
+            conditions.NoDuplicateParameterCondition(self.definition_info, self.name),
         ]
 
 
@@ -477,9 +471,7 @@ class ArgumentDefaultInliner(_ArgumentChanger):
         from rope.refactor import change_signature_arch as conditions
 
         return [
-            conditions.ParameterIndexInRangeCondition(
-                self.definition_info, self.index
-            )
+            conditions.ParameterIndexInRangeCondition(self.definition_info, self.index)
         ]
 
 

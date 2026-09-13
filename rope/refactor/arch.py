@@ -94,9 +94,7 @@ class Condition:
 
     def not_(self):
         if type(self).subjects is Condition.subjects:
-            raise TypeError(
-                f"<{self.name}> states no subjects and cannot be negated"
-            )
+            raise TypeError(f"<{self.name}> states no subjects and cannot be negated")
         return NegatedCondition(self)
 
 
@@ -122,8 +120,7 @@ class NegatedCondition(Condition):
     def non_violators(self):
         violators = self.condition.violators
         return [
-            subject for subject in self.condition.subjects()
-            if subject not in violators
+            subject for subject in self.condition.subjects() if subject not in violators
         ]
 
     def subjects(self):

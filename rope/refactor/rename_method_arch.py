@@ -325,9 +325,7 @@ class _OccurrenceAnalysis(OccurrenceAnalysis):
         # imported here: rope.refactor.rename delegates to this module
         from rope.refactor.rename import rename_in_module
 
-        return rename_in_module(
-            finder, self.transformation.new_name, resource=resource
-        )
+        return rename_in_module(finder, self.transformation.new_name, resource=resource)
 
     def record_unsure(self, occurrence):
         """Record, then preserve the caller's own `unsure` decision."""

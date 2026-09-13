@@ -19,7 +19,7 @@ from textwrap import dedent, indent
 from rope.base.project import Project
 from rope.refactor import rename_method_arch as arch
 
-SHAPES = dedent('''\
+SHAPES = dedent("""\
     class Shape:
         def area(self):
             raise NotImplementedError
@@ -34,9 +34,9 @@ SHAPES = dedent('''\
 
         def area(self):
             return self.side * self.side
-''')
+""")
 
-CLIENTS = dedent('''\
+CLIENTS = dedent("""\
     from shapes import Square
 
 
@@ -47,7 +47,7 @@ CLIENTS = dedent('''\
 
     square = Square(3)
     assert square.area() == 9
-''')
+""")
 
 
 def show(title, result):
@@ -100,9 +100,7 @@ def main():
         "fail_on_warning",
         arch.RenameMethodDriver(refactoring(), arch.FAIL_ON_WARNING).run(),
     )
-    result = arch.RenameMethodDriver(
-        refactoring(), arch.PROCEED_AFTER_WARNING
-    ).run()
+    result = arch.RenameMethodDriver(refactoring(), arch.PROCEED_AFTER_WARNING).run()
     show("proceed_after_warning", result)
 
     print("=== Apply, test, undo (execution control) ===\n")

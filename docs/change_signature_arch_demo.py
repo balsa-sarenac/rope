@@ -27,7 +27,7 @@ from rope.refactor.change_signature import (
     ArgumentReorderer,
 )
 
-REPORTS = dedent('''\
+REPORTS = dedent("""\
     class Report:
         def render(self, title, footer):
             return f"{title} / {footer}"
@@ -36,14 +36,14 @@ REPORTS = dedent('''\
     class FancyReport(Report):
         def render(self, title, footer):
             return f"** {title} ** / {footer}"
-''')
+""")
 
-CLIENTS = dedent('''\
+CLIENTS = dedent("""\
     from reports import Report
 
     report = Report()
     print(report.render("summary", "page 1"))
-''')
+""")
 
 
 def changers():
@@ -120,9 +120,7 @@ def main():
         "fail_on_warning",
         arch.RefactoringDriver(refactoring(), arch.FAIL_ON_WARNING).run(),
     )
-    result = arch.RefactoringDriver(
-        refactoring(), arch.PROCEED_AFTER_WARNING
-    ).run()
+    result = arch.RefactoringDriver(refactoring(), arch.PROCEED_AFTER_WARNING).run()
     show("proceed_after_warning", result)
 
     print("=== Apply, test, undo (execution control) ===\n")
