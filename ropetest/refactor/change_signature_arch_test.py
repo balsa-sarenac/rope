@@ -177,6 +177,56 @@ class CompositeTransformationTest(ChangeSignatureArchMixin, unittest.TestCase):
             ],
         )
 
+    def test_target_offset_follows_a_shrinking_edit_before_the_def(self):
+        code = dedent("""\
+            def caller():
+                return a_func(1, 222222222)
+            def a_func(p1, p2):
+                pass
+        """)
+        mod = self._write_module("mod1", code)
+        transformation = arch_cs.ChangeSignatureTransformation(
+            self.project,
+            mod,
+            code.index("def a_func") + 5,
+            [ArgumentRemover(1), ArgumentAdder(1, "p3", default="0")],
+        )
+        self.project.do(transformation.generate_changes())
+        self.assertEqual(
+            dedent("""\
+                def caller():
+                    return a_func(1)
+                def a_func(p1, p3=0):
+                    pass
+            """),
+            mod.read(),
+        )
+
+    def test_target_offset_follows_a_growing_edit_before_the_def(self):
+        code = dedent("""\
+            def caller():
+                return a_func(1, 2)
+            def a_func(p1, p2):
+                pass
+        """)
+        mod = self._write_module("mod1", code)
+        transformation = arch_cs.ChangeSignatureTransformation(
+            self.project,
+            mod,
+            code.index("def a_func") + 5,
+            [ArgumentAdder(2, "p3", value="333333333"), ArgumentRemover(0)],
+        )
+        self.project.do(transformation.generate_changes())
+        self.assertEqual(
+            dedent("""\
+                def caller():
+                    return a_func(2, 333333333)
+                def a_func(p2, p3):
+                    pass
+            """),
+            mod.read(),
+        )
+
     def test_step_invalid_against_original_signature_is_rejected(self):
         mod = self._write_module("mod1", TWO_PARAMS)
         steps = [ArgumentReorderer([1, 0, 2])]

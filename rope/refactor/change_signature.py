@@ -18,9 +18,12 @@ def _resolve_signature_target(project, resource, offset, pending=None):
     With a `pending` view (`arch.PendingChanges`), the target is
     resolved against the program including changes not yet applied,
     which is what lets a composite's later children see the edits of
-    their predecessors.
+    their predecessors.  The offset names a place in the original
+    program; the view carries it forward past the edits its
+    predecessors made before it in the same file.
     """
     if pending is not None:
+        offset = pending.translate(resource, offset)
         source = pending.source(resource)
         name = worder.Worder(source).get_word_at(offset)
         this_pymodule = pending.pymodule(resource)
@@ -282,9 +285,10 @@ class _ArgumentChanger(arch.Transformation):
         self.definition_info = None
         self.call_records = []
         self.unsure_occurrences = []
+        self.edits = {}
 
     def prepare_for_execution(self):
-        (self.target_name, self.primary, self.pyname, self.others) = (
+        self.target_name, self.primary, self.pyname, self.others = (
             _resolve_signature_target(
                 self.project, self.resource, self.offset, pending=self.pending
             )
@@ -365,6 +369,7 @@ class _ArgumentChanger(arch.Transformation):
                 changed = changers.change_definition(call)
             if changed is not None:
                 collector.add_change(start, end_parens, changed)
+        self.edits[pymodule.get_resource()] = list(collector.changes)
         return collector.get_changed()
 
 

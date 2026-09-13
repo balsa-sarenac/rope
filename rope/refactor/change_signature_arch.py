@@ -290,7 +290,7 @@ class ChangeSignatureTransformation(arch.Transformation):
                     )
                     inner.prepare_for_execution()
                     inner.check_preconditions()
-                    pending.absorb(inner.private_transform())
+                    pending.absorb(inner.private_transform(), inner.edits)
             finally:
                 pending.restore()
             self._pending = pending

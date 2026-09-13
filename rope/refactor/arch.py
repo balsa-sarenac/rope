@@ -385,12 +385,40 @@ class PendingChanges:
     def __init__(self, project):
         self.project = project
         self.sources = {}
+        self.edits = {}
 
-    def absorb(self, changes):
-        """Take the changes into the view without writing anything."""
+    def absorb(self, changes, edits=None):
+        """Take the changes into the view without writing anything.
+
+        `edits` maps a resource to the ``(start, end, new_text)`` edits
+        the change was built from, in the coordinates of the source the
+        child read.  The view keeps them so that a position in the
+        original program can be carried forward through every child
+        that edited the same file (see `translate`).
+        """
         for change in changes.changes:
             self.sources[change.resource] = change.new_contents
             self._install(change.resource)
+        for resource, resource_edits in (edits or {}).items():
+            self.edits.setdefault(resource, []).append(list(resource_edits))
+
+    def translate(self, resource, offset):
+        """The position in the pending source of an original offset.
+
+        A later child receives the caller's offset, which names a place
+        in the program *before* its predecessors edited it.  Each
+        predecessor's edits that end at or before the position shift it
+        by their length difference; an edit that starts at the position
+        itself (the definition header, which begins with the name) does
+        not move the name.
+        """
+        for resource_edits in self.edits.get(resource, []):
+            offset += sum(
+                len(new_text) - (end - start)
+                for start, end, new_text in resource_edits
+                if end <= offset
+            )
+        return offset
 
     def _install(self, resource):
         from rope.base import libutils
