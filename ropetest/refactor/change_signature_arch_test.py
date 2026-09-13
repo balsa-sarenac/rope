@@ -352,8 +352,8 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         self.assertEqual(3, record.lineno)
         self.assertIn("mod1.py:3", condition.error_string())
 
-    def _parameter_unused_condition(self, code, index):
-        mod = self._write_module("mod1", code)
+    def _parameter_unused_condition(self, code, index, module="mod1"):
+        mod = self._write_module(module, code)
         refactoring = self._refactoring(
             mod,
             code,
@@ -397,6 +397,66 @@ class BehaviorPreservingConditionTest(ChangeSignatureArchMixin, unittest.TestCas
         _, condition = self._parameter_unused_condition(code, 1)
         self.assertFalse(condition.check())
         self.assertEqual([2, 3], [occurrence.lineno for occurrence in condition.violators])
+
+    def test_keyword_argument_at_a_call_site_is_not_a_body_read(self):
+        code = dedent("""\
+            def a_func(p1, p2):
+                return p1
+            a_func(1, p2=2)
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertTrue(condition.check())
+
+    def test_positional_call_before_the_def_is_not_a_body_read(self):
+        code = dedent("""\
+            def caller(p2):
+                return a_func(1, p2)
+            def a_func(p1, p2):
+                return p1
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertTrue(condition.check())
+
+    def test_body_read_is_found_after_a_non_ascii_default(self):
+        code = dedent("""\
+            def a_func(p1, p2="é"):
+                return p2
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertFalse(condition.check())
+        self.assertEqual([2], [o.lineno for o in condition.violators])
+
+    def test_body_read_is_found_after_a_docstring(self):
+        code = dedent("""\
+            def a_func(p1, p2):
+                \"\"\"p2 is documented, not read, here.\"\"\"
+                return p2
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertFalse(condition.check())
+        self.assertEqual([3], [o.lineno for o in condition.violators])
+
+    def test_body_read_is_found_in_a_one_line_def(self):
+        code = "def a_func(p1, p2): return p2\n"
+        _, condition = self._parameter_unused_condition(code, 1)
+        self.assertFalse(condition.check())
+        self.assertEqual([1], [o.lineno for o in condition.violators])
+
+    def test_body_read_condition_can_be_negated(self):
+        """One scan per check keeps subjects and violators the same objects.
+
+        Only the read direction is meaningful: when the parameter is
+        not read the range is empty, and `NegatedCondition` reports the
+        complement of an empty range, which holds vacuously.
+        """
+        code = dedent("""\
+            def a_func(p1, p2):
+                return p2
+        """)
+        _, condition = self._parameter_unused_condition(code, 1)
+        negated = condition.not_()
+        self.assertTrue(negated.check())
+        self.assertEqual([], negated.violators)
 
     def test_removed_star_args_slot_is_out_of_scope(self):
         code = dedent("""\

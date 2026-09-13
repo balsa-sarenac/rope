@@ -33,10 +33,9 @@ sequence stops at the first genuine failure rather than reporting
 later children against a signature that was never produced.
 """
 
-
 from rope.base import exceptions, pyobjects, taskhandle
 from rope.base.change import ChangeContents, ChangeSet
-from rope.refactor import arch, functionutils, occurrences
+from rope.refactor import arch, functionutils, occurrences, sourceutils
 from rope.refactor import change_signature as legacy
 from rope.refactor.change_signature import (
     ArgumentAdder,
@@ -425,9 +424,10 @@ class RemovedParameterUnusedCondition(arch.Condition):
     Removing a parameter the body still reads leaves a name that fails
     to resolve at runtime; the legacy rewrite never looked at the body.
     Subjects and violators are the body occurrences of the parameter's
-    name that resolve to that parameter, so the condition can be
-    negated.  A rebinding in the body counts as well: the check is
-    conservative.  Only named-parameter removal is checked, not the
+    name that resolve to that parameter -- one scan per check, so both
+    hold the same objects and the condition can be negated.  A
+    rebinding in the body counts as well: the check is conservative.
+    Only named-parameter removal is checked, not the
     ``*args``/``**kwargs`` slots, and only the selected definition is
     scanned, not hierarchy overrides -- the same limits as
     `NoArgumentValueLostCondition`.
@@ -439,6 +439,11 @@ class RemovedParameterUnusedCondition(arch.Condition):
     def __init__(self, child):
         super().__init__()
         self.child = child
+        self._occurrences = None
+
+    def check(self):
+        self._occurrences = None
+        return super().check()
 
     def removed_name(self):
         info = self.child.definition_info
@@ -447,6 +452,11 @@ class RemovedParameterUnusedCondition(arch.Condition):
         return None
 
     def subjects(self):
+        if self._occurrences is None:
+            self._occurrences = self._body_occurrences()
+        return self._occurrences
+
+    def _body_occurrences(self):
         name = self.removed_name()
         if name is None:
             return []
@@ -454,15 +464,17 @@ class RemovedParameterUnusedCondition(arch.Condition):
         scope = pyfunction.get_scope()
         if name not in scope:
             return []
+        # keywords=False: ``f(p2=1)`` at a call site names the slot,
+        # it does not read the parameter
         finder = occurrences.create_finder(
-            self.child.project, name, scope[name], imports=False
+            self.child.project, name, scope[name], imports=False, keywords=False
         )
         pymodule = pyfunction.get_module()
-        body_offset = _body_start_offset(pyfunction, pymodule)
+        start, end = sourceutils.get_body_region(pyfunction)
         return [
             occurrence
             for occurrence in finder.find_occurrences(pymodule=pymodule)
-            if occurrence.offset >= body_offset
+            if start <= occurrence.offset < end
         ]
 
     def _find_violators(self):
@@ -477,12 +489,6 @@ class RemovedParameterUnusedCondition(arch.Condition):
             f"Removing parameter <{self.removed_name()}> leaves reads"
             f" of it in the body at: {places}"
         )
-
-
-def _body_start_offset(pyfunction, pymodule):
-    """The offset of the first body statement; the header ends before it."""
-    first = pyfunction.get_ast().body[0]
-    return pymodule.lines.get_line_start(first.lineno) + first.col_offset
 
 
 class CallSitesReceiveRequiredArgumentCondition(arch.Condition):
