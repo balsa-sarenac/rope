@@ -182,7 +182,7 @@ class ChangeSignature:
 
         The changers run as a composite (`change_signature_arch`), each
         against the signature its predecessors produced, under the
-        LEGACY warning policy.  Four inputs therefore behave differently
+        LEGACY warning policy.  Five inputs therefore behave differently
         from the folded single pass this method used to run; the
         deprecated `remove`, `add`, `reorder`, `inline_default` and
         `normalize` still run that pass:
@@ -194,7 +194,9 @@ class ChangeSignature:
         * removing a non-existent index raises a `RefactoringError`
           instead of silently doing nothing;
         * inlining the default of a non-existent index raises a
-          `RefactoringError` instead of an `IndexError`.
+          `RefactoringError` instead of an `IndexError`;
+        * removing a negative index raises a `RefactoringError`; the
+          folded pass honoured it through Python's negative indexing.
 
         """
         # imported here: change_signature_arch builds on this module

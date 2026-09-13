@@ -77,10 +77,12 @@ class NoDuplicateParameterCondition(arch.Condition):
 class ParameterExistsCondition(arch.Condition):
     """The removed index denotes an existing parameter slot.
 
-    Replicates exactly the slots `ArgumentRemover` edits: a named
-    parameter, the ``*args`` slot at ``len(args)``, or the ``**kwargs``
-    slot just after it.  The legacy path silently no-ops outside these
-    slots; here the missing slot is a reified applicability failure.
+    The slots are the non-negative positions `ArgumentRemover` edits:
+    a named parameter, the ``*args`` slot at ``len(args)``, or the
+    ``**kwargs`` slot just after it.  The legacy path silently no-ops
+    outside these slots, except that it honoured a negative index
+    through Python's list indexing; here any missing slot is a reified
+    applicability failure.
     """
 
     name = "parameter-exists"
@@ -92,7 +94,7 @@ class ParameterExistsCondition(arch.Condition):
         self.index = index
 
     def subjects(self):
-        """Exactly the slots `ArgumentRemover` edits."""
+        """The non-negative slots `ArgumentRemover` edits."""
         info = self.definition_info
         named_count = len(info.args_with_defaults)
         slots = list(range(named_count))

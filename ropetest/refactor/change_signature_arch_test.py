@@ -640,6 +640,12 @@ class LegacyEntryPointBehaviorChangeTest(
         with self.assertRaisesRegex(exceptions.RefactoringError, "index <3>"):
             signature.get_changes([ArgumentDefaultInliner(3)])
 
+    def test_removing_a_negative_index_is_rejected(self):
+        """The folded pass honoured ``-1`` through Python's list indexing."""
+        _, signature = self._signature(TWO_PARAMS)
+        with self.assertRaisesRegex(exceptions.RefactoringError, "index <-1>"):
+            signature.get_changes([ArgumentRemover(-1)])
+
 
 if __name__ == "__main__":
     unittest.main()
